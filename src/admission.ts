@@ -3,6 +3,7 @@ import {
   assertValidInterval,
   claimKeyToString,
   evidenceRoles,
+  isEvidenceRole,
   type ClaimRecord,
 } from './domain.js';
 
@@ -69,6 +70,9 @@ export function validateClaimForAdmission(claim: ClaimRecord): ValidationReport 
       if (evidence.roles.length === 0) errors.push('evidence reference roles cannot be empty');
       if (new Set(evidence.roles).size !== evidence.roles.length) {
         errors.push('evidence reference roles must not contain duplicates');
+      }
+      if (evidence.roles.some((role) => !isEvidenceRole(role))) {
+        errors.push('evidence reference contains an unknown role');
       }
     }
     if (evidenceIds.has(evidence.sourceId)) errors.push(`duplicate evidence source: ${evidence.sourceId}`);
