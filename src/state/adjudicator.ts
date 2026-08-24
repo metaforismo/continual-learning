@@ -116,6 +116,15 @@ function evidenceIds(claims: readonly ClaimRecord[]): readonly string[] {
   return uniqueSorted(claims.flatMap((claim) => claim.evidence.map((reference) => reference.sourceId)));
 }
 
+function eligibleClaims(decision: InternalStateDecision): readonly ClaimRecord[] {
+  const ids = new Set(
+    decision.explanation.candidates
+      .filter((evaluation) => evaluation.eligible)
+      .map((evaluation) => evaluation.claim.id),
+  );
+  return Object.freeze(decision.candidates.filter((claim) => ids.has(claim.id)));
+}
+
 function evaluateCandidate(
   claim: ClaimRecord,
   slot: StateSlotDefinition,
@@ -179,17 +188,17 @@ function buildValueGroups(
   const groups: StateValueGroupEvaluation[] = [];
   for (const [valueKey, group] of grouped) {
     const claims = group.map((evaluation) => evaluation.claim);
-    const eligibleClaims = group
+    const eligibleGroupClaims = group
       .filter((evaluation) => evaluation.eligible)
       .map((evaluation) => evaluation.claim);
-    const eligibleReferences = eligibleClaims.flatMap((claim) =>
+    const eligibleReferences = eligibleGroupClaims.flatMap((claim) =>
       claim.evidence.filter((reference) => evidenceProjection.validatesReference(reference)),
     );
     const roleRanks = Object.freeze(
       slot.evidencePolicy.map((policy) => rankEvidence(eligibleReferences, policy)),
     );
     const reasons: string[] = [];
-    if (eligibleClaims.length === 0) reasons.push('no eligible claim supports this value');
+    if (eligibleGroupClaims.length === 0) reasons.push('no eligible claim supports this value');
     for (let index = 0; index < slot.evidencePolicy.length; index += 1) {
       const policy = slot.evidencePolicy[index];
       const rank = roleRanks[index];
@@ -200,17 +209,18 @@ function buildValueGroups(
 
     const firstClaim = claims[0];
     if (firstClaim === undefined) throw new Error('state grouping invariant violated');
+    const scoringClaims = eligibleGroupClaims.length > 0 ? eligibleGroupClaims : claims;
     groups.push(
       Object.freeze({
         value: firstClaim.value,
         valueKey,
         claimIds: uniqueSorted(claims.map((claim) => claim.id)),
-        eligibleClaimIds: uniqueSorted(eligibleClaims.map((claim) => claim.id)),
+        eligibleClaimIds: uniqueSorted(eligibleGroupClaims.map((claim) => claim.id)),
         eligible: reasons.length === 0,
         reasons: Object.freeze(reasons),
         roleRanks,
-        newestValidFrom: Math.max(...claims.map((claim) => claim.valid.from)),
-        highestConfidence: Math.max(...claims.map((claim) => claim.confidence)),
+        newestValidFrom: Math.max(...scoringClaims.map((claim) => claim.valid.from)),
+        highestConfidence: Math.max(...scoringClaims.map((claim) => claim.confidence)),
       }),
     );
   }
@@ -381,9 +391,11 @@ function frontiersForDecision(decision: InternalStateDecision): readonly StateFr
     );
   }
 
-  if (decision.status === 'disputed' && decision.candidates.length > 0) {
-    const effectiveAt = Math.max(...decision.candidates.map((claim) => claim.valid.from));
-    const newest = decision.candidates.filter((claim) => claim.valid.from === effectiveAt);
+  if (decision.status === 'disputed') {
+    const candidates = eligibleClaims(decision);
+    if (candidates.length === 0) return Object.freeze([]);
+    const effectiveAt = Math.max(...candidates.map((claim) => claim.valid.from));
+    const newest = candidates.filter((claim) => claim.valid.from === effectiveAt);
     return Object.freeze([
       Object.freeze({
         effectiveAt,
@@ -493,6 +505,7 @@ export function adjudicateState(
     if (cached !== undefined) return cached;
 
     const priorValidAt = source.claim.valid.from - 1;
+    if (!Number.isFinite(priorValidAt)) return false;
     const prior = adjudicateState(events, schema, {
       slotId: source.slot.id,
       view: request.view,
@@ -523,10 +536,11 @@ export function adjudicateState(
     const base = baseDecision(slot, localRequest, claims, evidence, schema);
     const invalidations: StateInvalidation[] = [];
     let budgetBlocked = false;
+    const eligibleBaseClaims = eligibleClaims(base);
     const baseline =
       base.claim?.valid.from ??
-      (base.candidates.length > 0
-        ? Math.max(...base.candidates.map((claim) => claim.valid.from))
+      (eligibleBaseClaims.length > 0
+        ? Math.max(...eligibleBaseClaims.map((claim) => claim.valid.from))
         : undefined);
 
     if (baseline !== undefined) {
