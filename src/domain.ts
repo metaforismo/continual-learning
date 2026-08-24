@@ -71,6 +71,15 @@ export type EvidenceTaint =
   | 'prompt-like'
   | 'secret-detected';
 
+export type EvidenceRole =
+  | 'supports'
+  | 'verifies'
+  | 'context'
+  | 'contradicts'
+  | 'constrains';
+
+const DEFAULT_EVIDENCE_ROLES: readonly EvidenceRole[] = Object.freeze(['supports']);
+
 export interface ArtifactRef {
   /** Provider-owned stable location. Raw bytes do not live in the canonical event log. */
   readonly uri: string;
@@ -108,6 +117,12 @@ export interface EvidenceRef {
   readonly sourceGroups: readonly string[];
   readonly authority: Authority;
   readonly contentHash: string;
+  /** How this evidence is used by the derived object. Omission is legacy `supports`. */
+  readonly roles?: readonly EvidenceRole[];
+}
+
+export function evidenceRoles(reference: EvidenceRef): readonly EvidenceRole[] {
+  return reference.roles ?? DEFAULT_EVIDENCE_ROLES;
 }
 
 export interface ClaimKey {

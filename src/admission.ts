@@ -2,6 +2,7 @@ import {
   AUTHORITY_RANK,
   assertValidInterval,
   claimKeyToString,
+  evidenceRoles,
   type ClaimRecord,
 } from './domain.js';
 
@@ -51,7 +52,8 @@ export function validateClaimForAdmission(claim: ClaimRecord): ValidationReport 
 
   const evidenceIds = new Set<string>();
   const sourceGroups = new Set<string>();
-  let strongestEvidenceRank = -1;
+  let strongestAuthorizingEvidenceRank = -1;
+  let hasAuthorizingEvidence = false;
   let hasStrongVerification = false;
 
   for (const evidence of claim.evidence) {
@@ -63,29 +65,55 @@ export function validateClaimForAdmission(claim: ClaimRecord): ValidationReport 
     if (new Set(evidence.sourceGroups).size !== evidence.sourceGroups.length) {
       errors.push('evidence reference source groups must not contain duplicates');
     }
+    if (evidence.roles !== undefined) {
+      if (evidence.roles.length === 0) errors.push('evidence reference roles cannot be empty');
+      if (new Set(evidence.roles).size !== evidence.roles.length) {
+        errors.push('evidence reference roles must not contain duplicates');
+      }
+    }
     if (evidenceIds.has(evidence.sourceId)) errors.push(`duplicate evidence source: ${evidence.sourceId}`);
     evidenceIds.add(evidence.sourceId);
     for (const group of evidence.sourceGroups) sourceGroups.add(group);
-    strongestEvidenceRank = Math.max(strongestEvidenceRank, AUTHORITY_RANK[evidence.authority]);
-    if (AUTHORITY_RANK[evidence.authority] >= AUTHORITY_RANK['tool-verified']) {
+
+    const roles = evidenceRoles(evidence);
+    const authorizes = roles.includes('supports') || roles.includes('verifies');
+    if (authorizes) {
+      hasAuthorizingEvidence = true;
+      strongestAuthorizingEvidenceRank = Math.max(
+        strongestAuthorizingEvidenceRank,
+        AUTHORITY_RANK[evidence.authority],
+      );
+    }
+    const explicitVerification = evidence.roles?.includes('verifies') === true;
+    const legacyVerification = evidence.roles === undefined;
+    if (
+      (explicitVerification || legacyVerification) &&
+      AUTHORITY_RANK[evidence.authority] >= AUTHORITY_RANK['tool-verified']
+    ) {
       hasStrongVerification = true;
+    }
+    if (roles.includes('contradicts') && roles.includes('verifies')) {
+      warnings.push(`evidence ${evidence.sourceId} both contradicts and verifies the same claim`);
     }
   }
 
   if (claim.authority !== 'system-policy' && claim.evidence.length === 0) {
     errors.push('non-policy claims require recoverable evidence');
   }
+  if (claim.authority !== 'system-policy' && !hasAuthorizingEvidence) {
+    errors.push('non-policy claims require supporting or verifying evidence');
+  }
 
   if (
     claim.authority !== 'system-policy' &&
-    strongestEvidenceRank >= 0 &&
-    AUTHORITY_RANK[claim.authority] > strongestEvidenceRank
+    strongestAuthorizingEvidenceRank >= 0 &&
+    AUTHORITY_RANK[claim.authority] > strongestAuthorizingEvidenceRank
   ) {
-    errors.push('claim authority cannot exceed the strongest cited evidence');
+    errors.push('claim authority cannot exceed its strongest supporting or verifying evidence');
   }
 
   if (claim.epistemicStatus === 'verified' && !hasStrongVerification) {
-    errors.push('verified claims require tool, human, or policy-grade evidence');
+    errors.push('verified claims require explicit verifying evidence or legacy strong evidence');
   }
 
   if (claim.evidence.length > 1 && sourceGroups.size === 1) {

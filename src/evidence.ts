@@ -1,8 +1,10 @@
 import {
   AUTHORITY_RANK,
+  evidenceRoles,
   type EvidenceAvailability,
   type EvidenceRecord,
   type EvidenceRef,
+  type EvidenceRole,
   type EvidenceSensitivity,
   type MemoryEvent,
 } from './domain.js';
@@ -49,6 +51,11 @@ function sameStrings(left: readonly string[], right: readonly string[]): boolean
     if (left[index] !== right[index]) return false;
   }
   return true;
+}
+
+function validReferenceRoles(reference: EvidenceRef): boolean {
+  if (reference.roles === undefined) return true;
+  return reference.roles.length > 0 && new Set(reference.roles).size === reference.roles.length;
 }
 
 /**
@@ -199,13 +206,19 @@ export function validateEvidenceForCapture(
   return freezeReport(errors, warnings);
 }
 
-export function evidenceRefFor(record: EvidenceRecord): EvidenceRef {
-  return Object.freeze({
+export function evidenceRefFor(
+  record: EvidenceRecord,
+  roles?: readonly EvidenceRole[],
+): EvidenceRef {
+  const base = {
     sourceId: record.id,
     sourceGroups: Object.freeze([...record.sourceGroups]),
     authority: record.authority,
     contentHash: record.artifact.digest,
-  });
+  };
+  return roles === undefined
+    ? Object.freeze(base)
+    : Object.freeze({ ...base, roles: Object.freeze([...roles]) });
 }
 
 /**
@@ -297,13 +310,15 @@ export class EvidenceProjection {
   }
 
   validatesReference(reference: EvidenceRef): boolean {
+    if (!validReferenceRoles(reference)) return false;
     const projected = this.#evidence.get(reference.sourceId);
     if (projected === undefined || projected.availability !== 'available') return false;
     const record = projected.record;
     return (
       sameStrings(reference.sourceGroups, record.sourceGroups) &&
       reference.authority === record.authority &&
-      reference.contentHash === record.artifact.digest
+      reference.contentHash === record.artifact.digest &&
+      evidenceRoles(reference).length > 0
     );
   }
 
