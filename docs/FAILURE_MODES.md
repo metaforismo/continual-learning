@@ -6,7 +6,7 @@ The primary design goal is not maximum memory volume. It is preventing accumulat
 
 | Boundary | Failure | Why naive systems fail | Required control |
 |---|---|---|---|
-| Capture | Missing evidence | A summary stores the conclusion but not the source span or tool result | Canonical raw event plus content-addressed evidence reference |
+| Capture | Missing evidence | A summary stores the conclusion but not the source span or tool result | Provider-owned artifact plus canonical content-addressed evidence metadata |
 | Capture | Memory contamination | An extraction hallucination becomes persistent system state | Quarantine, source-grounded admission, transition verifier |
 | Capture | Prompt-injection persistence | Malicious document text is later recalled as an instruction | Taint labels; memory is data by default; instruction authority is separate |
 | Capture | Secret retention | Tokens, keys, health, or financial data are stored indefinitely | Data classification, secret scanning, least-retention policy, scoped deletion |
@@ -15,7 +15,7 @@ The primary design goal is not maximum memory volume. It is preventing accumulat
 | Write | Replay inconsistency | An LLM judge returns a different decision when the same history is replayed | Log judge/model/config/output hash; deterministic operators where possible |
 | Write | Concurrent drift | Two writers update the same belief partition and both commit | Compare-and-set revisions or serializable per-key transactions |
 | Write | Authority escalation | A model inference is stored as if directly confirmed by a human | Authority cannot exceed cited evidence; explicit admission policy |
-| Write | Duplicate evidence inflation | Twenty copies of one source are treated as twenty independent confirmations | Source groups and independence-aware counts |
+| Write | Duplicate evidence inflation | Chunks, retries, mirrors, or summaries of one source are treated as independent confirmations | Digest deduplication plus inherited source-group unions |
 | State | Stale-state use | Updated evidence is retrieved but old state still drives action | Write-side adjudication plus constrained current-state projection |
 | State | Ghost memory | Old, transition, and current states enter one undifferentiated prompt | Current/historical/transition roles and view-specific assembly |
 | State | Implicit invalidation | A change in one slot should invalidate related assumptions | Bounded dependency propagation plus unresolved-state markers |
@@ -34,7 +34,7 @@ The primary design goal is not maximum memory volume. It is preventing accumulat
 | Decision | Retrieval-use gap | Correct memory is visible but not applied | Separate evidence extraction, state resolution, policy execution, generation |
 | Decision | Procedure collision | Multiple individually good skills give incompatible instructions | Applicability router, precedence contracts, conflict detection |
 | Decision | High-risk overreach | A weak memory drives destructive external action | Evidence requirement, current verification, approval policy, least authority |
-| Outcome | False success | The model declares completion without environmental proof | Tests, tools, human verdicts, task-specific verifiers |
+| Outcome | False success | The model declares completion without environmental proof | Scoped outcome events with exact evidence references and verifier-authority floors |
 | Outcome | Sparse credit | Final success cannot identify which memory operation helped | Step-level transition rewards and local verifier signals |
 | Outcome | Spurious credit | Every retrieved memory is rewarded after success | Usage tracing, ablations, holdouts, causal comparisons |
 | Outcome | Self-confirmation loop | The agent writes a belief, retrieves it, acts on it, and treats that as confirmation | Self-derived evidence cannot independently verify itself |

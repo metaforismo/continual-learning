@@ -143,3 +143,19 @@ test('dependency closures cannot collectively exceed a per-kind cap', () => {
     /maxPerKind/,
   );
 });
+
+test('an untrusted dependency cycle rejects one candidate instead of crashing context assembly', () => {
+  const packets = [
+    packet({ id: 'cycle-a', activationScore: 100, dependsOn: ['cycle-b'] }),
+    packet({ id: 'cycle-b', activationScore: 99, dependsOn: ['cycle-a'] }),
+    packet({ id: 'safe', activationScore: 1, topics: ['safe'] }),
+  ];
+
+  const compiled = compileContext(packets, { tokenBudget: 200, view: 'current' });
+  assert.equal(compiled.selected.some((item) => item.id === 'safe'), true);
+  assert.equal(compiled.selected.some((item) => item.id === 'cycle-a'), false);
+  assert.match(
+    compiled.rejected.find((item) => item.id === 'cycle-a')?.reason ?? '',
+    /dependency cycle/,
+  );
+});

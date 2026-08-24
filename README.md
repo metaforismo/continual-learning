@@ -68,8 +68,10 @@ There is **one canonical history and many projections**. Episodes, claims, assoc
 
 The foundational TypeScript kernel currently includes:
 
-- an append-only, replayable event ledger;
-- strict JSON snapshots so post-write mutation cannot alter history;
+- an append-only, schema-versioned event ledger with structural and semantic replay;
+- strict single-read JSON snapshots resistant to mutation and prototype-pollution input;
+- a content-addressed evidence metadata plane with provenance DAGs, source independence, sensitivity, taint, and availability state;
+- evidence-backed claims, associations, and verified outcomes with hard scope boundaries;
 - write-time claim admission checks and quarantine;
 - bitemporal claim resolution using world time and transaction time;
 - explicit supersession, revocation, authority, ambiguity, and provenance;
@@ -89,11 +91,12 @@ npm install
 npm test
 ```
 
-The test suite currently exercises 19 foundational invariants.
+The test suite currently exercises 39 foundational invariants.
 
 ## Documentation
 
 - [Architecture](docs/ARCHITECTURE.md)
+- [Evidence model](docs/EVIDENCE_MODEL.md)
 - [Learning contract](docs/LEARNING_CONTRACT.md)
 - [Failure modes and mitigations](docs/FAILURE_MODES.md)
 - [Evaluation and evidence ladder](docs/EVALUATION.md)

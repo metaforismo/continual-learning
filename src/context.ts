@@ -108,7 +108,11 @@ export function compileContext(
 
     const visit = (id: string): boolean => {
       if (selected.has(id) || seen.has(id)) return true;
-      if (visiting.has(id)) throw new Error(`dependency cycle detected at ${id}`);
+      if (visiting.has(id)) {
+        if (required) throw new Error(`dependency cycle detected at ${id}`);
+        rejected.set(rootId, `dependency cycle detected at ${id}`);
+        return false;
+      }
       const packet = packetById.get(id);
       if (packet === undefined) {
         if (required) throw new Error(`required dependency does not exist: ${id}`);

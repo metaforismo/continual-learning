@@ -15,9 +15,13 @@ Report both final task accuracy and intermediate diagnostics.
 
 ## Evaluation suites
 
-### A. Ledger and replay
+### A. Ledger, evidence, and replay
 
-- deterministic replay from the same event stream;
+- deterministic structural and semantic replay from the same event stream;
+- content-address verification and duplicate-byte/source-independence attacks;
+- provenance DAG order and lineage closure;
+- taint, sensitivity, authority, and scope laundering attempts;
+- evidence restriction/deletion effects on derived state;
 - immutable snapshots;
 - duplicate/idempotency handling;
 - crash-prefix recovery;
@@ -66,8 +70,11 @@ Report both final task accuracy and intermediate diagnostics.
 - authority escalation;
 - audit erasure;
 - replay inconsistency;
-- prompt-injection persistence;
-- secret retention.
+- prompt-injection persistence and taint propagation;
+- secret retention and inline-preview leakage;
+- fabricated verifier authority;
+- self-reported outcomes without evidence;
+- duplicate artifacts presented as independent confirmation.
 
 ### F. Procedural learning
 

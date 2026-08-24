@@ -31,7 +31,19 @@ canonical events
     -> retrieval indexes
 ```
 
-Indexes and summaries may be rebuilt. Evidence cannot.
+Indexes and summaries may be rebuilt. Evidence is never destructively rewritten: raw bytes live in a content-addressed provider, while capture metadata and restriction/deletion tombstones remain auditable.
+
+### Evidence before memory
+
+Raw artifacts, observations, messages, tool results, tests, and trajectories enter a separate evidence plane before they may authorize learned state.
+
+```text
+artifact bytes -> content address -> evidence metadata -> derived memory object
+```
+
+The event log stores digest, provenance, independent source groups, taints, sensitivity, scope, and availability—not arbitrary sensitive bytes. Derived evidence inherits origin groups, taints, authority ceilings, and sensitivity from its parents. This prevents summaries from manufacturing independent confirmation or laundering untrusted/private content.
+
+See [Evidence model](EVIDENCE_MODEL.md).
 
 ### Claims, not unqualified facts
 
@@ -127,7 +139,8 @@ The source episodes remain intact. Promotion and deprecation are new events; the
                               |
        +----------------------+----------------------+
        |                      |                      |
-  bitemporal claims      associations           outcomes
+ content-addressed       bitemporal claims      associations/outcomes
+ evidence metadata
        |                      |                      |
        +---------------+------+----------------------+
                        |
@@ -146,7 +159,9 @@ The source episodes remain intact. Promotion and deprecation are new events; the
 
 ### 1. Capture evidence
 
-Store the original event, tool result, document span, human correction, test result, or environment transition.
+Store the original event, tool result, document span, human correction, test result, or environment transition in a provider-owned content-addressed artifact store. Append immutable metadata to the ledger: digest, origin groups, authority, scope, observation time, sensitivity, taints, lineage, and availability.
+
+Raw evidence has exactly one independent source group. Derived evidence inherits the exact union of its parents' groups and cannot reduce inherited taint or sensitivity.
 
 ### 2. Extract candidates
 
@@ -235,12 +250,14 @@ The new evidence re-enters the same authorization and budget pipeline.
 
 ### Outcome capture
 
+An outcome is itself a scoped derived object and must cite captured evidence. A bare agent self-report is not a verified success.
+
 For each use of a memory or procedure, record:
 
 - task and context fingerprint;
 - selected memory ids;
 - action;
-- verifier result;
+- verifier result and exact evidence references;
 - success, failure, partial, or unknown outcome;
 - alternative candidates considered;
 - latency and token cost.
@@ -348,16 +365,27 @@ Indexes are caches over canonical events. They may lag, fail, or be replaced wit
 
 The current kernel enforces a first subset:
 
-1. event ids are unique and sequence numbers monotonic;
-2. persisted values are immutable JSON snapshots;
-3. non-policy claims cite evidence;
-4. derived authority cannot exceed source authority;
-5. unverified model inference cannot bypass quarantine;
-6. current and historical truth use explicit validity intervals;
-7. supersession preserves the old claim;
-8. unresolved conflicts stay ambiguous unless a declared authority policy applies;
-9. activation and materialization are separate;
-10. generic high-fan associations are inhibited;
-11. high-risk procedures require evidence packets;
-12. repeated copies of one trajectory do not count as independent learning;
-13. procedure promotion requires cross-context evidence and counterexample search.
+1. event ids are unique, schema-versioned, and sequence/transaction time are monotonic;
+2. persisted values are immutable single-read JSON snapshots; dangerous keys remain data rather than mutating prototypes;
+3. structural replay is followed by semantic replay through the same public write contract;
+4. artifact evidence is content-addressed and the same bytes cannot manufacture a second evidence identity;
+5. evidence provenance is a transaction-ordered DAG;
+6. derived evidence inherits the exact union of source groups, all taints, an authority ceiling, and the strongest sensitivity of its parents;
+7. raw sensitive/secret previews cannot enter the canonical log and their artifacts require provider-managed encryption;
+8. claims, associations, and outcomes cite captured, available, exact evidence references;
+9. derived objects and procedure evidence cannot cross scopes implicitly; global evidence may narrow into a scoped use;
+10. non-policy claims cite evidence and derived claim lineage must already exist;
+11. unverified model inference cannot bypass quarantine;
+12. evidence restriction blocks later admission and current resolution; deletion is terminal in the kernel;
+13. current and historical truth use explicit validity intervals and transaction-time reconstruction;
+14. supersession preserves the old claim;
+15. unresolved conflicts stay ambiguous unless a declared authority policy applies;
+16. activation and model-context materialization are separate;
+17. scope authorization is a hard retrieval boundary and out-of-scope associations are not traversed;
+18. generic high-fan associations are inhibited;
+19. high-risk procedures require evidence packets;
+20. packet dependency cycles are contained rather than crashing context assembly;
+21. repeated copies of one trajectory or counterexample run do not count as independent learning;
+22. unverified successes cannot manufacture procedure confidence;
+23. procedure promotion requires cross-context evidence and counterexample search;
+24. dependency closures cannot bypass context packet caps.
