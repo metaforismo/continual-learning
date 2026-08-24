@@ -74,13 +74,14 @@ The foundational TypeScript kernel currently includes:
 - strict single-read JSON snapshots resistant to mutation and prototype-pollution input;
 - a content-addressed evidence metadata plane with provenance DAGs, source independence, sensitivity, taint, and availability state;
 - role-aware evidence use: `supports`, `verifies`, `context`, `contradicts`, and `constrains`;
-- evidence-backed claims, associations, and verified outcomes with hard scope boundaries;
+- evidence-backed claims, associations, and verifier-role outcomes with hard scope boundaries;
 - write-time claim admission checks and quarantine;
 - bitemporal claim projection using world time and transaction time;
 - deterministic, domain-specific state policies rather than one global authority ranking;
 - explicit `current`, `historical`, `disputed`, `unknown-current`, and `unknown` state;
 - premise resistance for requests that presuppose stale state;
 - bounded implicit invalidation over a validated dependency DAG;
+- transition-aware invalidation that distinguishes a value change from a same-value reaffirmation;
 - sparse multi-signal memory activation;
 - associative expansion with fan-out inhibition;
 - a dependency-, evidence-role-, diversity-, and token-budget-aware context compiler;
@@ -97,7 +98,7 @@ npm install
 npm test
 ```
 
-The test suite currently exercises 49 foundational and state-adjudication scenarios.
+The test suite currently exercises 57 foundational and state-adjudication scenarios.
 
 ## Documentation
 
