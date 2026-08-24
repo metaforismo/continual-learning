@@ -40,6 +40,8 @@ A legacy evidence reference without an explicit role is interpreted as `supports
 
 A high-authority contextual source does not automatically verify a claim. A currently available `contradicts` reference prevents that claim from directly governing state in v1.
 
+Runtime role validation is fail-closed. Unknown role names are rejected at evidence-reference construction, claim admission, state-schema validation, and context-packet compilation rather than being silently ignored.
+
 ## State slots
 
 A state schema contains typed slots. Each slot declares:
@@ -71,7 +73,7 @@ Exactly one eligible value may remain. Multiple eligible values produce `dispute
 
 ### `latest-valid`
 
-The value with the unique latest world-valid start time wins. A tie remains disputed.
+The eligible value with the unique latest world-valid start time wins. A tie remains disputed.
 
 ### `role-authority`
 
@@ -81,7 +83,7 @@ Values are compared lexicographically using the slot's ordered evidence-role pol
 
 Role-specific authority is compared first. World-valid start time is used only when authority vectors tie.
 
-No strategy silently chooses by prompt order, retrieval rank, or raw repetition count.
+No strategy silently chooses by prompt order, retrieval rank, or raw repetition count. Ineligible claims are retained for explanation but cannot influence latest-valid scoring, group confidence, invalidation baselines, or disputed-state frontiers indirectly.
 
 ## State roles
 
@@ -121,7 +123,20 @@ commute estimate
 departure plan
 ```
 
-V1 uses an explicit, validated dependency DAG. Each rule declares a source slot, target slot, and reason. A newer source frontier invalidates an older dependent value.
+V1 uses an explicit, validated dependency DAG. Each rule declares a source slot, target slot, reason, and optional trigger.
+
+### Transition triggers
+
+The default trigger is `value-change`:
+
+```text
+Rome → Zurich          invalidates dependents
+Rome → Rome            reaffirmation; does not invalidate
+```
+
+This prevents a later confirmation of the same authorized value from retiring otherwise valid downstream state. A rule may instead declare `trigger: new-claim` when every newer claim occurrence should invalidate the target regardless of whether the authorized value changed.
+
+For `value-change`, the adjudicator reconstructs the authorized source state immediately before the selected source claim's world-valid start and compares values. This is deterministic and bitemporal, but it currently assumes millisecond-granularity world time; richer event-order semantics remain future work.
 
 Propagation is:
 
@@ -155,24 +170,28 @@ A state decision becomes one model-facing packet:
 - historical packets are authorized only in historical context views;
 - evidence dependencies retain their roles;
 - required evidence roles are enforced by the context compiler;
+- packet provenance includes only eligible claims that actually contributed to the decision;
 - `unknown-current` packets include the newer invalidation basis but do not rematerialize the stale candidate as current evidence.
 
-With strict provenance mapping enabled, packet construction fails if any adjudicating evidence source lacks a corresponding source packet.
+Provenance mapping is strict by default. Packet construction fails when any adjudicating evidence source lacks a corresponding source packet. A caller may explicitly opt out only for non-model inspection surfaces that are not used as an authoritative context boundary.
 
 ## Implemented invariants
 
 1. schemas have unique slots, claim keys, rules, and evidence-role policies;
-2. invalidation graphs are acyclic and bounded;
-3. unavailable or forged evidence cannot authorize a candidate;
-4. inferred, disputed, unknown, low-confidence, or contradicted claims fail declared policies;
-5. required evidence roles are evaluated per value, not inferred from source authority;
-6. repeated evidence does not win a state conflict by count;
-7. equal policy authority remains disputed;
-8. world time and transaction time remain distinct;
-9. newer upstream state can retire an older dependent assumption without inventing a replacement;
-10. request premises are assessed independently;
-11. context closure contains only eligible claims that contributed to the decision;
-12. unresolved-state packets constrain the model instead of presenting raw candidates as truth.
+2. schema strategies, roles, authorities, and invalidation triggers are runtime validated;
+3. invalidation graphs are acyclic and bounded;
+4. unavailable or forged evidence cannot authorize a candidate;
+5. inferred, disputed, unknown, low-confidence, or contradicted claims fail declared policies;
+6. required evidence roles are evaluated per value, not inferred from source authority;
+7. repeated evidence does not win a state conflict by count;
+8. equal policy authority remains disputed;
+9. ineligible claims cannot affect scoring, invalidation, or context provenance indirectly;
+10. world time and transaction time remain distinct;
+11. newer upstream state can retire an older dependent assumption without inventing a replacement;
+12. same-value reaffirmations do not invalidate dependents unless a rule explicitly uses `new-claim`;
+13. request premises are assessed independently;
+14. context closure contains only eligible claims that contributed to the decision;
+15. unresolved-state packets constrain the model instead of presenting raw candidates as truth.
 
 ## Current limitations
 
@@ -186,6 +205,7 @@ The implementation does not yet provide:
 - human review UI for high-impact ambiguity;
 - learned authority routing;
 - public benchmark evidence for premise resistance or implicit invalidation;
-- automatic repair after a slot becomes `unknown-current`.
+- automatic repair after a slot becomes `unknown-current`;
+- richer than millisecond-granularity world-event ordering for transition detection.
 
 These are explicit future gates, not capabilities implied by the v1 API.
