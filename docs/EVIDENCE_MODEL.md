@@ -172,7 +172,7 @@ An outcome such as `success` is not accepted as a bare self-report. It records:
 - exact inherited source groups;
 - evidence references.
 
-The claimed verifier must be supported by evidence with sufficient authority. For example, a `human` verdict cannot be backed only by a tool result, and a `test` verdict requires tool-verified evidence or stronger.
+The claimed verifier must be backed by evidence used in the `verifies` role and with sufficient authority. For example, a `human` verdict cannot be backed only by a tool result, and a `test` verdict requires tool-verified verifying evidence or stronger. Merely supportive or contextual evidence cannot masquerade as verification. Legacy references that omit roles remain accepted as verifier evidence for replay compatibility, while new integrations should declare `verifies` explicitly.
 
 This closes an important self-improvement loophole:
 
