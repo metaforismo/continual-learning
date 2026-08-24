@@ -43,6 +43,11 @@ export interface StateInvalidationRule {
   readonly sourceSlotId: string;
   readonly targetSlotId: string;
   readonly reason: string;
+  /**
+   * `value-change` is the default and ignores a later reaffirmation of the same authorized value.
+   * `new-claim` treats every newer source claim as an invalidating frontier.
+   */
+  readonly trigger?: 'value-change' | 'new-claim';
   /** Defaults to true: uncertain newer upstream state blocks stale downstream assumptions. */
   readonly propagateWhenSourceUncertain?: boolean;
 }
