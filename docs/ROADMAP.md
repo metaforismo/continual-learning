@@ -58,12 +58,13 @@ Exit gate: bounded p95 read/context cost and no material degradation on controll
 - [x] typed static state slots and explicit domain policies;
 - [x] bounded implicit invalidation search and transitive propagation;
 - [x] `current / historical / disputed / unknown-current / unknown` state roles;
-- [ ] transition verifier for coverage, preservation, and faithfulness;
+- [x] deterministic transition verifier for structural coverage, projection preservation, state assertions, and evidence-backed semantic checks;
 - [x] role- and domain-specific authority policy;
 - [x] deterministic policy execution after candidate extraction;
 - [x] premise resistance and role-aware context packets;
 - [ ] human review UI for high-impact ambiguity;
-- [ ] serializable per-belief write partitions and logged judge verdicts;
+- [x] content-addressed process-local transition verdict journal;
+- [ ] atomic durable ledger + verdict commit, serializable per-belief partitions, and authenticated judge identities;
 - [ ] persisted, signed state-policy versions and migration fixtures.
 
 Exit gate: strong current-state, historical-state, premise-resistance, and contamination results.

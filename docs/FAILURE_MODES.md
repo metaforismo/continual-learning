@@ -16,6 +16,11 @@ The primary design goal is not maximum memory volume. It is preventing accumulat
 | Write | Concurrent drift | Two writers update the same belief partition and both commit | Compare-and-set revisions or serializable per-key transactions |
 | Write | Authority escalation | A model inference is stored as if directly confirmed by a human | Authority cannot exceed cited evidence; explicit admission policy |
 | Write | Duplicate evidence inflation | Chunks, retries, mirrors, or summaries of one source are treated as independent confirmations | Digest deduplication plus inherited source-group unions |
+| Write | Partial multi-event commit | Early events persist before a later operation fails | Isolated semantic replay and one verified append |
+| Write | Stale-base overwrite | A verified proposal commits after another writer changed memory | Base fingerprint compare-and-swap at verification and commit |
+| Write | Permissive-policy injection | Untrusted code verifies itself with a caller-chosen weak policy | Trusted frozen `TransitionVerifier` capability owns policy and commit |
+| Write | Verifier report replay | An old or supportive artifact is presented as a new independent check | Explicit verifier role, report digest, proposal subject, authority, and host trust boundary |
+| Write | Oversized proposal | Huge operations/evidence/check graphs exhaust verification resources | Policy limits plus host-level raw request and parser-depth caps |
 | State | Stale-state use | Updated evidence is retrieved but old state still drives action | Write-side adjudication plus constrained current-state projection |
 | State | Ghost memory | Old, transition, and current states enter one undifferentiated prompt | Current/historical/transition roles and view-specific assembly |
 | State | Implicit invalidation | A change in one slot should invalidate related assumptions | Bounded dependency propagation plus unresolved-state markers |

@@ -30,6 +30,10 @@ Inspect the current repository, branch, pull requests, workflows, tests, and rec
 - Learned procedures require applicability boundaries and counterexamples.
 - Activation, state adjudication, and model-context materialization remain separate stages.
 - Model-facing state packets require provenance closure by default.
+- Model- or plugin-proposed memory operations must pass a trusted-host `TransitionVerifier`; do not append them directly.
+- A pure transition verdict is not commit authority; only the owning verifier runtime may commit its exact accepted result.
+- External checks are untrusted metadata unless the host has authenticated or independently authorized the verifier/evidence path.
+- Transition proposals must remain within policy resource bounds and exact authorized scopes.
 - All learned behavior must be inspectable, suppressible, and testable.
 
 ## Engineering

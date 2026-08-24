@@ -64,16 +64,20 @@ Report both final task accuracy and intermediate diagnostics.
 
 ### E. Memory transition reliability
 
-- omission;
-- corruption of unrelated state;
-- unsupported additions;
-- authority escalation;
-- audit erasure;
-- replay inconsistency;
-- prompt-injection persistence and taint propagation;
-- secret retention and inline-preview leakage;
-- fabricated verifier authority;
-- self-reported outcomes without evidence;
+- atomic all-or-nothing replay of multi-event proposals;
+- stale-base verification and commit races;
+- omitted inputs, undeclared used evidence, and invalid ignore reasons;
+- corruption of unrelated claim/evidence lifecycle state;
+- exact affected-state coverage and before/after assertions;
+- assertions that try to hide writes through early world time or old transaction time;
+- unsupported additions and authority/scope escalation, including implicit global writes;
+- risk under-declaration and cumulative check requirements;
+- audit/result/append digest tampering;
+- proposer/verifier self-confirmation and copied-result commit attempts;
+- semantic report digest, role, subject, and evidence-authority binding;
+- prompt-injection persistence, tainted associations/outcomes, and secret capture;
+- policy resource-limit bypass and oversized proposal behavior;
+- replay inconsistency and unknown future event types;
 - duplicate artifacts presented as independent confirmation.
 
 ### F. Procedural learning
@@ -177,7 +181,7 @@ Architecture, invariants, threat model, and tests over hand-built cases. No capa
 
 ### Level 1 — deterministic kernel
 
-Replay, bitemporal state, quarantine, activation, compilation, and procedure-promotion invariants pass locally and in CI.
+Replay, evidence, bitemporal state, adjudication, transition verification, quarantine, activation, compilation, and procedure-promotion invariants pass locally and in CI.
 
 Allowed claim: "the kernel enforces these tested contracts."
 

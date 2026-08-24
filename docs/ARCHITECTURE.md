@@ -173,20 +173,29 @@ Model-generated state is not automatically authoritative. Candidates enter quara
 
 ### 4. Verify the transition
 
-Check:
+The implemented v1 verifier binds a proposal to an exact ledger fingerprint, replays all operations in
+an isolated kernel, computes the exact projection delta, and evaluates:
 
-- coverage — important source information was not omitted;
-- preservation — unrelated valid state was not destroyed;
-- faithfulness — additions are supported by cited evidence;
-- authority — a derived claim cannot become stronger than its evidence;
-- temporal consistency — valid intervals and supersession are coherent;
-- independence — duplicate citations do not become multiple votes;
-- scope — writes cannot escape their authorized tenant/user/project boundary;
-- replay consistency — the decision and judge configuration are logged.
+- mechanical coverage — each declared input is used or explicitly ignored, and used evidence was declared;
+- projection preservation — no lifecycle/availability change occurs outside explicit event targets;
+- state impact — affected claim keys have before/after or preservation assertions at the transition time;
+- faithfulness — high-risk semantic claims require independent evidence-backed checks;
+- authority — a derived claim or verifier cannot become stronger than cited evidence;
+- temporal consistency — valid intervals, supersession, and state views remain coherent;
+- independence — proposal and verifier actors are separated and duplicate citations do not become votes;
+- scope — every touched scope, including `global`, is explicitly authorized;
+- replay consistency — policy, verifier, proposal, append, and result are content-addressed;
+- resource bounds — operations, evidence fan-in, checks, state assertions, scopes, and canonical size are capped.
 
-### 5. Commit an event
+The process-local `TransitionVerifier` is the commit capability. A pure verdict from
+`verifyTransition` is inspectable but cannot commit through that capability unless the exact runtime
+issued it.
 
-Accepted operations append a new event. There is no destructive in-place edit of canonical history.
+### 5. Commit the append
+
+Accepted operations are reconstructed as one staged append over the verified base prefix. Commit
+returns a new kernel and rechecks the base and resulting fingerprints, so failure cannot leave a
+partial in-memory write. Durable atomic persistence remains a later storage-layer contract.
 
 ## Read path
 
@@ -388,4 +397,12 @@ The current kernel enforces a first subset:
 21. repeated copies of one trajectory or counterexample run do not count as independent learning;
 22. unverified successes cannot manufacture procedure confidence;
 23. procedure promotion requires cross-context evidence and counterexample search;
-24. dependency closures cannot bypass context packet caps.
+24. dependency closures cannot bypass context packet caps;
+25. multi-event memory updates are staged atomically against an exact base fingerprint;
+26. proposed writes cannot omit declared evidence silently or use undeclared evidence;
+27. state-changing proposals must declare and verify the actual affected claim keys;
+28. high-risk and destructive writes require cumulative independent semantic/security/human gates;
+29. tainted authoritative claims, associations, and outcomes cannot auto-commit without security evidence;
+30. only the trusted verifier runtime that issued an accepted result can commit it;
+31. accepted results retain only a content-addressed append, not a copy of historical memory;
+32. transition proposals are bounded by policy-defined operation, scope, evidence, check, assertion, and size limits.

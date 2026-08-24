@@ -85,6 +85,7 @@ The foundational TypeScript kernel currently includes:
 - sparse multi-signal memory activation;
 - associative expansion with fan-out inhibition;
 - a dependency-, evidence-role-, diversity-, and token-budget-aware context compiler;
+- a capability-gated transition verifier with isolated replay, base-fingerprint CAS, exact deltas, input coverage, state assertions, taint/risk gates, and append-only verdict audit;
 - procedure promotion gates based on independent evidence, verified outcomes, counterexample search, applicability boundaries, failure rate, and Wilson confidence bounds.
 
 The kernel intentionally has no embedding provider, database, LLM dependency, or DeepSeek Harness coupling yet. Those are replaceable adapters, not correctness primitives.
@@ -98,13 +99,14 @@ npm install
 npm test
 ```
 
-The test suite currently exercises 59 foundational and state-adjudication scenarios.
+The test suite currently exercises 97 foundational, state-adjudication, and transition-verification scenarios.
 
 ## Documentation
 
 - [Architecture](docs/ARCHITECTURE.md)
 - [Evidence model](docs/EVIDENCE_MODEL.md)
 - [State adjudication](docs/STATE_ADJUDICATION.md)
+- [Transition verification](docs/TRANSITION_VERIFICATION.md)
 - [Learning contract](docs/LEARNING_CONTRACT.md)
 - [Failure modes and mitigations](docs/FAILURE_MODES.md)
 - [Evaluation and evidence ladder](docs/EVALUATION.md)
@@ -129,4 +131,4 @@ Those claims must be earned independently through the evidence ladder.
 
 ## Status
 
-Foundational kernel and deterministic state adjudicator. APIs may change while durability, transition verification, concurrency, and evaluation boundaries are established.
+Foundational kernel, deterministic state adjudicator, and in-memory transition verifier. APIs may change while durability, authenticated actors, concurrency, and evaluation boundaries are established.
