@@ -33,6 +33,9 @@ function validateSlot(slot: StateSlotDefinition): void {
   if (!STRATEGIES.has(slot.strategy)) {
     throw new Error(`state slot ${slot.id} has an unknown resolution strategy`);
   }
+  if (slot.allowInferred !== undefined && typeof slot.allowInferred !== 'boolean') {
+    throw new Error(`state slot ${slot.id} allowInferred must be boolean`);
+  }
 
   if (slot.evidencePolicy.length === 0) {
     throw new Error(`state slot ${slot.id} requires an explicit evidence policy`);
@@ -46,6 +49,11 @@ function validateSlot(slot: StateSlotDefinition): void {
       throw new Error(`state slot ${slot.id} repeats evidence role ${policy.role}`);
     }
     roles.add(policy.role);
+    if (policy.required !== undefined && typeof policy.required !== 'boolean') {
+      throw new Error(
+        `state slot ${slot.id} role ${policy.role} required must be boolean`,
+      );
+    }
     if (policy.authorityPrecedence.length === 0) {
       throw new Error(
         `state slot ${slot.id} role ${policy.role} requires an authority precedence`,
@@ -96,6 +104,14 @@ function validateRule(
     rule.trigger !== 'new-claim'
   ) {
     throw new Error(`state invalidation ${rule.id} has an unknown trigger`);
+  }
+  if (
+    rule.propagateWhenSourceUncertain !== undefined &&
+    typeof rule.propagateWhenSourceUncertain !== 'boolean'
+  ) {
+    throw new Error(
+      `state invalidation ${rule.id} propagateWhenSourceUncertain must be boolean`,
+    );
   }
 }
 
