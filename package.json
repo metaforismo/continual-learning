@@ -1,0 +1,19 @@
+{
+  "name": "continual-learning",
+  "version": "0.0.0",
+  "private": true,
+  "description": "A model-agnostic continual-learning memory kernel for long-running agents.",
+  "type": "module",
+  "engines": {
+    "node": ">=22.0.0"
+  },
+  "scripts": {
+    "clean": "rm -rf dist",
+    "build": "tsc -p tsconfig.json",
+    "test": "npm run build && node --test test/*.test.mjs",
+    "check": "npm run test"
+  },
+  "devDependencies": {
+    "typescript": "5.8.3"
+  }
+}
