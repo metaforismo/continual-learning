@@ -14,7 +14,10 @@ The roadmap is ordered by evidence dependency. Later phases must not be used to 
 - [x] bounded context compiler;
 - [x] evidence-aware procedure promotion;
 - [x] first deterministic tests and CI;
-- [ ] event-schema version header and migration fixtures;
+- [x] event-schema version header and fail-closed replay fixtures;
+- [x] content-addressed evidence metadata plane and provenance DAG;
+- [x] source-group, taint, authority, sensitivity, and scope inheritance;
+- [x] evidence-backed claims, associations, and verified outcomes;
 - [ ] concurrency/isolation contract;
 - [ ] provenance-closure deletion model.
 
@@ -28,7 +31,9 @@ Exit gate: all Level 1 evidence requirements in [EVALUATION.md](EVALUATION.md).
 - association and temporal indexes;
 - hot/warm/cold storage boundaries;
 - index watermarks and rebuild commands;
-- source/artifact content addressing;
+- [x] source/artifact content-addressing contract;
+- artifact/blob provider with digest verification;
+- evidence metadata persistence and projection checkpoints;
 - export, inspect, supersede, suppress, and forget APIs;
 - deterministic replay against persisted fixtures.
 

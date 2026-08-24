@@ -124,6 +124,8 @@ export class ClaimProjection {
         projected.revokedSeq = event.seq;
         return;
       }
+      case 'evidence.captured':
+      case 'evidence.availability-changed':
       case 'association.added':
       case 'outcome.recorded':
         return;
@@ -144,7 +146,11 @@ export class ClaimProjection {
     return this.#claims.get(claimId)?.lifecycle;
   }
 
-  resolve(key: ClaimKey, options: ResolveClaimOptions): ClaimResolution {
+  resolve(
+    key: ClaimKey,
+    options: ResolveClaimOptions,
+    authorizeClaim: (claim: ClaimRecord) => boolean = () => true,
+  ): ClaimResolution {
     if (!Number.isFinite(options.validAt)) throw new TypeError('validAt must be finite');
 
     const minimumAuthority = options.minimumAuthority ?? 'model-inference';
@@ -155,6 +161,7 @@ export class ClaimProjection {
       if (claimKeyToString(projected.claim.key) !== keyString) return false;
       if (projected.lifecycle === 'quarantined' || projected.lifecycle === 'revoked') return false;
       if (AUTHORITY_RANK[projected.claim.authority] < minimumRank) return false;
+      if (!authorizeClaim(projected.claim)) return false;
       return effectiveIntervalContains(projected, options.validAt);
     });
 

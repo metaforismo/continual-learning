@@ -4,6 +4,9 @@ export type JsonValue =
   | readonly JsonValue[]
   | { readonly [key: string]: JsonValue };
 
+export const EVENT_SCHEMA_VERSION = 1 as const;
+export type EventSchemaVersion = typeof EVENT_SCHEMA_VERSION;
+
 export type Authority =
   | 'model-inference'
   | 'repeated-observation'
@@ -41,12 +44,70 @@ export interface ValidInterval {
   readonly to?: number;
 }
 
+export type EvidenceKind =
+  | 'user-message'
+  | 'assistant-message'
+  | 'tool-call'
+  | 'tool-result'
+  | 'document'
+  | 'source-span'
+  | 'test-result'
+  | 'human-feedback'
+  | 'environment-transition'
+  | 'trajectory'
+  | 'other';
+
+export type EvidenceSensitivity =
+  | 'public'
+  | 'internal'
+  | 'personal'
+  | 'sensitive'
+  | 'secret';
+
+export type EvidenceTaint =
+  | 'untrusted-source'
+  | 'external-content'
+  | 'model-generated'
+  | 'prompt-like'
+  | 'secret-detected';
+
+export interface ArtifactRef {
+  /** Provider-owned stable location. Raw bytes do not live in the canonical event log. */
+  readonly uri: string;
+  /** Content address in the form sha256:<64 lowercase hex characters>. */
+  readonly digest: string;
+  readonly sizeBytes: number;
+  readonly mediaType: string;
+  readonly encryption: 'none' | 'provider-managed';
+  readonly retention: 'durable' | 'reference-only' | 'ephemeral';
+}
+
+export interface EvidenceRecord {
+  readonly id: string;
+  readonly scope: string;
+  readonly kind: EvidenceKind;
+  /** Independent-origin groups represented by this evidence. Raw evidence has exactly one. */
+  readonly sourceGroups: readonly string[];
+  readonly authority: Authority;
+  /** World time at which the source event or artifact was observed. */
+  readonly observedAt: number;
+  readonly sensitivity: EvidenceSensitivity;
+  readonly taints: readonly EvidenceTaint[];
+  readonly artifact: ArtifactRef;
+  /** Bounded non-authoritative display aid. Never the canonical source bytes. */
+  readonly preview?: string;
+  readonly derivedFrom: readonly string[];
+  readonly labels: readonly string[];
+}
+
+export type EvidenceAvailability = 'available' | 'restricted' | 'deleted';
+
 export interface EvidenceRef {
   readonly sourceId: string;
-  /** Independent evidence should use a distinct sourceGroup. */
-  readonly sourceGroup: string;
+  /** Exact independent-origin groups inherited from the captured evidence lineage. */
+  readonly sourceGroups: readonly string[];
   readonly authority: Authority;
-  readonly contentHash?: string;
+  readonly contentHash: string;
 }
 
 export interface ClaimKey {
@@ -71,6 +132,7 @@ export interface ClaimRecord {
 
 export interface AssociationRecord {
   readonly id: string;
+  readonly scope: string;
   readonly from: string;
   readonly to: string;
   readonly kind:
@@ -86,6 +148,7 @@ export interface AssociationRecord {
 }
 
 export interface BaseEvent<TType extends string, TData> {
+  readonly schemaVersion: EventSchemaVersion;
   readonly id: string;
   readonly seq: number;
   readonly type: TType;
@@ -94,6 +157,22 @@ export interface BaseEvent<TType extends string, TData> {
   readonly actor: string;
   readonly data: TData;
 }
+
+export type EvidenceCapturedEvent = BaseEvent<
+  'evidence.captured',
+  {
+    readonly evidence: EvidenceRecord;
+  }
+>;
+
+export type EvidenceAvailabilityChangedEvent = BaseEvent<
+  'evidence.availability-changed',
+  {
+    readonly evidenceId: string;
+    readonly availability: EvidenceAvailability;
+    readonly reason: string;
+  }
+>;
 
 export type ClaimAssertedEvent = BaseEvent<
   'claim.asserted',
@@ -140,17 +219,21 @@ export type AssociationAddedEvent = BaseEvent<
 export type OutcomeRecordedEvent = BaseEvent<
   'outcome.recorded',
   {
+    readonly scope: string;
     readonly subjectId: string;
     readonly taskId: string;
     readonly contextFingerprint: string;
-    readonly sourceGroup: string;
+    readonly sourceGroups: readonly string[];
     readonly outcome: 'success' | 'failure' | 'partial' | 'unknown';
     readonly verifier: 'none' | 'model' | 'tool' | 'test' | 'human';
+    readonly evidence: readonly EvidenceRef[];
     readonly notes?: string;
   }
 >;
 
 export type MemoryEvent =
+  | EvidenceCapturedEvent
+  | EvidenceAvailabilityChangedEvent
   | ClaimAssertedEvent
   | ClaimAdmittedEvent
   | ClaimSupersededEvent
@@ -160,7 +243,7 @@ export type MemoryEvent =
 
 export type MemoryEventInput = MemoryEvent extends infer TEvent
   ? TEvent extends MemoryEvent
-    ? Omit<TEvent, 'seq'>
+    ? Omit<TEvent, 'seq' | 'schemaVersion'>
     : never
   : never;
 

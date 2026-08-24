@@ -45,6 +45,9 @@ export function validateClaimForAdmission(claim: ClaimRecord): ValidationReport 
   if (claim.derivedFrom.includes(claim.id)) {
     errors.push('a claim cannot derive from itself');
   }
+  if (new Set(claim.derivedFrom).size !== claim.derivedFrom.length) {
+    errors.push('claim derivedFrom must not contain duplicates');
+  }
 
   const evidenceIds = new Set<string>();
   const sourceGroups = new Set<string>();
@@ -53,10 +56,16 @@ export function validateClaimForAdmission(claim: ClaimRecord): ValidationReport 
 
   for (const evidence of claim.evidence) {
     if (evidence.sourceId.trim().length === 0) errors.push('evidence sourceId cannot be empty');
-    if (evidence.sourceGroup.trim().length === 0) errors.push('evidence sourceGroup cannot be empty');
-    if (evidenceIds.has(evidence.sourceId)) warnings.push(`duplicate evidence source: ${evidence.sourceId}`);
+    if (evidence.sourceGroups.length === 0) errors.push('evidence reference requires source groups');
+    if (evidence.sourceGroups.some((group) => group.trim().length === 0)) {
+      errors.push('evidence reference source groups cannot contain empty values');
+    }
+    if (new Set(evidence.sourceGroups).size !== evidence.sourceGroups.length) {
+      errors.push('evidence reference source groups must not contain duplicates');
+    }
+    if (evidenceIds.has(evidence.sourceId)) errors.push(`duplicate evidence source: ${evidence.sourceId}`);
     evidenceIds.add(evidence.sourceId);
-    sourceGroups.add(evidence.sourceGroup);
+    for (const group of evidence.sourceGroups) sourceGroups.add(group);
     strongestEvidenceRank = Math.max(strongestEvidenceRank, AUTHORITY_RANK[evidence.authority]);
     if (AUTHORITY_RANK[evidence.authority] >= AUTHORITY_RANK['tool-verified']) {
       hasStrongVerification = true;
@@ -85,6 +94,9 @@ export function validateClaimForAdmission(claim: ClaimRecord): ValidationReport 
 
   if (claim.tags.some((tag) => tag.trim().length === 0)) {
     errors.push('claim tags cannot contain empty values');
+  }
+  if (new Set(claim.tags).size !== claim.tags.length) {
+    errors.push('claim tags must not contain duplicates');
   }
 
   return report(errors, warnings);

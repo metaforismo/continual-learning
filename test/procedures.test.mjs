@@ -5,6 +5,7 @@ import { assessProcedure, procedureApplies } from '../dist/index.js';
 
 const definition = {
   id: 'procedure-auth-race',
+  scope: 'project/showstead',
   name: 'Stabilize auth setup before assertions',
   goalSignature: 'debug flaky authentication tests',
   requiredFeatures: ['authentication', 'asynchronous-session'],
@@ -16,7 +17,8 @@ const definition = {
 function evidence(index, overrides = {}) {
   return {
     id: `evidence-${index}`,
-    sourceGroup: `run-${index}`,
+    scope: 'project/showstead',
+    sourceGroups: [`run-${index}`],
     contextFingerprint: index % 2 === 0 ? 'nextjs-auth' : 'react-auth',
     kind: 'application',
     outcome: 'success',
@@ -28,7 +30,7 @@ function evidence(index, overrides = {}) {
 
 test('a lesson is not promoted merely because one trajectory is repeated', () => {
   const repeated = Array.from({ length: 20 }, (_, index) =>
-    evidence(index, { id: `repeat-${index}`, sourceGroup: 'same-run' }),
+    evidence(index, { id: `repeat-${index}`, sourceGroups: ['same-run'] }),
   );
   const assessment = assessProcedure(definition, repeated);
   assert.equal(assessment.stage, 'candidate');
@@ -45,7 +47,7 @@ test('promotion requires independent verified outcomes and counterexample search
     ...applications,
     evidence(99, {
       id: 'counterexample-search',
-      sourceGroup: 'counterexample-search',
+      sourceGroups: ['counterexample-search'],
       contextFingerprint: 'broader-auth-space',
       kind: 'counterexample-search',
       outcome: 'unknown',
@@ -75,7 +77,7 @@ test('duplicate counterexample reports from one source group do not inflate trus
   const duplicateCounterexamples = Array.from({ length: 3 }, (_, index) =>
     evidence(100 + index, {
       id: `counterexample-${index}`,
-      sourceGroup: 'one-counterexample-run',
+      sourceGroups: ['one-counterexample-run'],
       contextFingerprint: 'counterexample-space',
       kind: 'counterexample-search',
       outcome: 'unknown',
@@ -100,5 +102,41 @@ test('contradictory applicability boundaries are rejected', () => {
         [],
       ),
     /both required and forbidden/,
+  );
+});
+
+test('unverified successes cannot manufacture the confidence needed for promotion', () => {
+  const unverified = Array.from({ length: 20 }, (_, index) =>
+    evidence(index, {
+      contextFingerprint: `context-${index % 4}`,
+      verifier: 'none',
+    }),
+  );
+  const twoVerified = [
+    evidence(100, { contextFingerprint: 'verified-a', verifier: 'test' }),
+    evidence(101, { contextFingerprint: 'verified-b', verifier: 'human' }),
+  ];
+  const counterexample = evidence(200, {
+    id: 'counterexample-unverified-stream',
+    sourceGroups: ['counterexample-unverified-stream'],
+    contextFingerprint: 'counterexample-space',
+    kind: 'counterexample-search',
+    outcome: 'unknown',
+    verifier: 'human',
+  });
+
+  const assessment = assessProcedure(definition, [...unverified, ...twoVerified, counterexample]);
+  assert.equal(assessment.stage, 'candidate');
+  assert.ok(assessment.blockers.some((blocker) => blocker.includes('success lower bound')));
+});
+
+test('procedure learning cannot mix outcome evidence across scopes', () => {
+  assert.throws(
+    () =>
+      assessProcedure(definition, [
+        evidence(1),
+        evidence(2, { scope: 'project/other' }),
+      ]),
+    /cannot train procedure scope/,
   );
 });

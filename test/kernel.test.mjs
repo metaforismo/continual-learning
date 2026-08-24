@@ -1,12 +1,49 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
+import { createHash } from 'node:crypto';
 
 import { EventLedger, MemoryKernel } from '../dist/index.js';
 
 const DAY = 86_400_000;
 
+function digestFor(value) {
+  return `sha256:${createHash('sha256').update(value).digest('hex')}`;
+}
+
 function evidence(sourceId, authority = 'human-explicit', sourceGroup = sourceId) {
-  return { sourceId, sourceGroup, authority };
+  return { sourceId, sourceGroups: [sourceGroup], authority, contentHash: digestFor(sourceId) };
+}
+
+function evidenceRecord(sourceId, authority = 'human-explicit', sourceGroup = sourceId) {
+  return {
+    id: sourceId,
+    scope: 'user/francesco',
+    kind: 'human-feedback',
+    sourceGroups: [sourceGroup],
+    authority,
+    observedAt: 0,
+    sensitivity: 'personal',
+    taints: authority === 'model-inference' ? ['model-generated'] : [],
+    artifact: {
+      uri: `memory://evidence/${sourceId}`,
+      digest: digestFor(sourceId),
+      sizeBytes: 1,
+      mediaType: 'application/json',
+      encryption: 'none',
+      retention: 'durable',
+    },
+    derivedFrom: [],
+    labels: ['test'],
+  };
+}
+
+function captureClaimEvidence(kernel, candidate, recordedAt) {
+  for (const reference of candidate.evidence) {
+    kernel.captureEvidence(
+      { eventId: `capture-${reference.sourceId}`, recordedAt, actor: 'test-evidence-writer' },
+      evidenceRecord(reference.sourceId, reference.authority, reference.sourceGroups[0]),
+    );
+  }
 }
 
 function claim({
@@ -68,6 +105,7 @@ test('unverified model inference is quarantined and cannot drive state before ad
     epistemicStatus: 'inferred',
   });
 
+  captureClaimEvidence(kernel, inferred, 9);
   kernel.assertClaim({ eventId: 'event-assert', recordedAt: 10, actor: 'memory-writer' }, inferred);
 
   const before = kernel.resolveClaim(inferred.key, { validAt: 10 });
@@ -89,6 +127,7 @@ test('unverified model inference is quarantined and cannot drive state before ad
     authority: 'model-inference',
     epistemicStatus: 'inferred',
   });
+  captureClaimEvidence(kernel, another, 12);
   assert.throws(
     () =>
       kernel.assertClaim(
@@ -105,11 +144,13 @@ test('bitemporal supersession preserves historical truth and current truth', () 
   const oldClaim = claim({ id: 'claim-old', value: 'vim', from: 0 });
   const newClaim = claim({ id: 'claim-new', value: 'zed', from: 30 * DAY });
 
+  captureClaimEvidence(kernel, oldClaim, 0);
   kernel.assertClaim(
     { eventId: 'event-old', recordedAt: 1 * DAY, actor: 'human' },
     oldClaim,
     { authorizeImmediately: true },
   );
+  captureClaimEvidence(kernel, newClaim, 30 * DAY);
   kernel.assertClaim(
     { eventId: 'event-new', recordedAt: 31 * DAY, actor: 'human' },
     newClaim,
@@ -149,6 +190,7 @@ test('conflicting claims remain ambiguous unless an explicit authority policy re
   });
   const human = claim({ id: 'claim-high', value: 'zed', authority: 'human-explicit' });
 
+  captureClaimEvidence(kernel, inferred, 0);
   kernel.assertClaim(
     { eventId: 'event-low', recordedAt: 1, actor: 'writer' },
     inferred,
@@ -159,6 +201,7 @@ test('conflicting claims remain ambiguous unless an explicit authority policy re
     inferred.id,
     'kept as a competing hypothesis',
   );
+  captureClaimEvidence(kernel, human, 2);
   kernel.assertClaim(
     { eventId: 'event-high', recordedAt: 3, actor: 'human' },
     human,
@@ -247,4 +290,54 @@ test('the ledger rejects circular and sparse structures instead of persisting am
       }),
     /sparse array/,
   );
+});
+
+test('claim identities and derivation lineage cannot be invented or reused', () => {
+  const kernel = new MemoryKernel();
+  const original = claim({ id: 'stable-claim-id', value: 'vim' });
+  captureClaimEvidence(kernel, original, 1);
+  kernel.assertClaim(
+    { eventId: 'assert-stable-claim', recordedAt: 2, actor: 'writer' },
+    original,
+    { authorizeImmediately: true },
+  );
+
+  assert.throws(
+    () =>
+      kernel.assertClaim(
+        { eventId: 'assert-duplicate-claim', recordedAt: 3, actor: 'writer' },
+        { ...original, value: 'zed' },
+        { authorizeImmediately: true },
+      ),
+    /claim id already exists/,
+  );
+
+  const derived = claim({ id: 'derived-with-missing-parent', value: 'zed' });
+  captureClaimEvidence(kernel, derived, 3);
+  assert.throws(
+    () =>
+      kernel.assertClaim(
+        { eventId: 'assert-missing-parent', recordedAt: 4, actor: 'writer' },
+        { ...derived, derivedFrom: ['missing-parent'] },
+        { authorizeImmediately: true },
+      ),
+    /unknown parent claim/,
+  );
+});
+
+test('strict JSON snapshotting preserves __proto__ as data without prototype pollution', () => {
+  const ledger = new EventLedger();
+  const malicious = JSON.parse('{"__proto__":{"polluted":true},"value":"safe"}');
+  const event = ledger.append({
+    id: 'prototype-data-event',
+    type: 'outcome.recorded',
+    recordedAt: 1,
+    actor: 'test',
+    data: malicious,
+  });
+
+  assert.equal({}.polluted, undefined);
+  assert.equal(Object.prototype.hasOwnProperty.call(event.data, '__proto__'), true);
+  assert.equal(event.data.__proto__.polluted, true);
+  assert.equal(Object.getPrototypeOf(event.data), Object.prototype);
 });

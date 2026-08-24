@@ -1,5 +1,6 @@
 export interface ProcedureDefinition {
   readonly id: string;
+  readonly scope: string;
   readonly name: string;
   readonly goalSignature: string;
   readonly requiredFeatures: readonly string[];
@@ -10,8 +11,9 @@ export interface ProcedureDefinition {
 
 export interface ProcedureEvidence {
   readonly id: string;
-  /** Prevents retries or duplicated reports from masquerading as independent evidence. */
-  readonly sourceGroup: string;
+  readonly scope: string;
+  /** Exact independent-origin groups inherited from the verified outcome evidence. */
+  readonly sourceGroups: readonly string[];
   readonly contextFingerprint: string;
   readonly kind: 'application' | 'counterexample-search';
   readonly outcome: 'success' | 'failure' | 'partial' | 'unknown';
@@ -83,8 +85,18 @@ function deduplicateEvidence(evidence: readonly ProcedureEvidence[]): readonly P
 
   for (const item of [...evidence].sort((a, b) => a.recordedAt - b.recordedAt || a.id.localeCompare(b.id))) {
     if (item.id.trim().length === 0) throw new Error('procedure evidence id cannot be empty');
-    if (item.sourceGroup.trim().length === 0) {
-      throw new Error(`procedure evidence ${item.id} requires a sourceGroup`);
+    if (item.sourceGroups.length === 0) {
+      throw new Error(`procedure evidence ${item.id} requires source groups`);
+    }
+    if (item.sourceGroups.some((group) => group.trim().length === 0)) {
+      throw new Error(`procedure evidence ${item.id} has an empty source group`);
+    }
+    if (new Set(item.sourceGroups).size !== item.sourceGroups.length) {
+      throw new Error(`procedure evidence ${item.id} has duplicate source groups`);
+    }
+    const canonicalGroups = [...item.sourceGroups].sort();
+    if (canonicalGroups.some((group, index) => group !== item.sourceGroups[index])) {
+      throw new Error(`procedure evidence ${item.id} source groups must be sorted canonically`);
     }
     if (item.contextFingerprint.trim().length === 0) {
       throw new Error(`procedure evidence ${item.id} requires a contextFingerprint`);
@@ -97,7 +109,7 @@ function deduplicateEvidence(evidence: readonly ProcedureEvidence[]): readonly P
 
     // One report per (kind, source group) is counted. Retries, mirrors, or repeated summaries from
     // one trajectory remain audit evidence but cannot satisfy independence or counterexample gates.
-    const independenceKey = `${item.kind}\u0000${item.sourceGroup}`;
+    const independenceKey = `${item.kind}\u0000${item.sourceGroups.join('\u0001')}`;
     if (sourceGroupsByKind.has(independenceKey)) continue;
     sourceGroupsByKind.add(independenceKey);
     result.push(item);
@@ -112,12 +124,14 @@ function statistics(evidence: readonly ProcedureEvidence[]): ProcedureStatistics
   const successes = applications.filter((item) => item.outcome === 'success').length;
   const failures = applications.filter((item) => item.outcome === 'failure').length;
   const partials = applications.filter((item) => item.outcome === 'partial').length;
-  const decidedTrials = successes + failures;
   const stronglyVerifiedSuccesses = applications.filter(
     (item) =>
       item.outcome === 'success' &&
       (item.verifier === 'tool' || item.verifier === 'test' || item.verifier === 'human'),
   ).length;
+  // Unverified success is useful as a candidate signal but cannot improve the confidence bound used
+  // for promotion. Any observed failure remains conservative negative evidence.
+  const promotionTrials = stronglyVerifiedSuccesses + failures;
 
   return Object.freeze({
     independentApplications: applications.length,
@@ -127,8 +141,8 @@ function statistics(evidence: readonly ProcedureEvidence[]): ProcedureStatistics
     partials,
     stronglyVerifiedSuccesses,
     counterexampleSearches: independent.filter((item) => item.kind === 'counterexample-search').length,
-    wilsonLowerBound: wilsonLowerBound(successes, decidedTrials),
-    failureRate: decidedTrials === 0 ? 1 : failures / decidedTrials,
+    wilsonLowerBound: wilsonLowerBound(stronglyVerifiedSuccesses, promotionTrials),
+    failureRate: promotionTrials === 0 ? 1 : failures / promotionTrials,
   });
 }
 
@@ -174,6 +188,7 @@ export function assessProcedure(
   options: { readonly deprecated?: boolean } = {},
 ): ProcedureAssessment {
   if (definition.id.trim().length === 0) throw new Error('procedure id cannot be empty');
+  if (definition.scope.trim().length === 0) throw new Error('procedure scope cannot be empty');
   if (definition.name.trim().length === 0) throw new Error('procedure name cannot be empty');
   if (definition.goalSignature.trim().length === 0) {
     throw new Error('procedure goalSignature cannot be empty');
@@ -203,6 +218,17 @@ export function assessProcedure(
   }
   if (new Set(definition.derivedFromEpisodes).size !== definition.derivedFromEpisodes.length) {
     throw new Error('derivedFromEpisodes must not contain duplicates');
+  }
+
+  for (const item of evidence) {
+    if (item.scope.trim().length === 0) {
+      throw new Error(`procedure evidence ${item.id} requires a scope`);
+    }
+    if (item.scope !== definition.scope) {
+      throw new Error(
+        `procedure evidence scope ${item.scope} cannot train procedure scope ${definition.scope}`,
+      );
+    }
   }
 
   const stats = statistics(evidence);

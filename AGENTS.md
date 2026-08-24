@@ -14,13 +14,15 @@ Inspect the current repository, branch, pull requests, workflows, tests, and rec
 ## Architectural invariants
 
 - Canonical experience history is append-only.
-- Derived state, indexes, summaries, and procedures must preserve provenance.
+- Derived state, indexes, summaries, outcomes, associations, and procedures must preserve exact provenance.
+- Evidence identity, authority, scope, source groups, taint, sensitivity, and digest cannot be invented by a derived object.
 - Do not destructively replace raw episodes with summaries.
+- Raw sensitive bytes stay outside the immutable event log; metadata and tombstones remain auditable.
 - Retrieval does not imply authorization.
 - Current and historical state must remain distinguishable.
 - Ambiguity and unknown-current are legal outcomes.
 - Unverified model inference must not silently become authoritative state.
-- Repeated copies of one source do not count as independent evidence.
+- Repeated copies, chunks, retries, and summaries of one origin do not count as independent evidence.
 - Learned procedures require applicability boundaries and counterexamples.
 - Activation and model-context materialization remain separate stages.
 - All learned behavior must be inspectable, suppressible, and testable.

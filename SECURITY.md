@@ -33,7 +33,15 @@ Reading memory and proposing memory are separate capabilities. Admission, supers
 
 ### Evidence before action
 
-High-risk learned procedures require recoverable evidence and current verification. Sensitive external actions retain harness approval and sandbox policies.
+High-risk learned procedures require recoverable evidence and current verification. Claims, associations, and outcomes must cite captured, available evidence with exact digest, authority, source-group, and scope metadata. Sensitive external actions retain harness approval and sandbox policies.
+
+### Raw bytes outside the immutable log
+
+The canonical event ledger stores content addresses, provenance, taints, sensitivity, and availability transitions—not arbitrary sensitive artifact bytes. Sensitive and secret artifacts require provider-managed encryption and cannot carry inline previews. This reduces, but does not by itself complete, deletion obligations across providers, backups, caches, indexes, exports, or learned parameters.
+
+### No provenance laundering
+
+Derived evidence inherits the union of source groups, all taints, the strongest sensitivity, and an authority ceiling from its parents. Summarization cannot silently turn one source into multiple confirmations, external prompt-like text into a trusted instruction, or secret material into ordinary memory.
 
 ### Quarantine by default
 

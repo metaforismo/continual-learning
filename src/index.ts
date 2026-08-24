@@ -3,6 +3,7 @@ export * from './admission.js';
 export * from './claims.js';
 export * from './context.js';
 export * from './domain.js';
+export * from './evidence.js';
 export * from './kernel.js';
 export * from './ledger.js';
 export * from './procedures.js';
