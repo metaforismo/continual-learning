@@ -24,6 +24,13 @@ export const AUTHORITY_RANK: Readonly<Record<Authority, number>> = Object.freeze
   'system-policy': 5,
 });
 
+export function isAuthority(value: unknown): value is Authority {
+  return (
+    typeof value === 'string' &&
+    Object.prototype.hasOwnProperty.call(AUTHORITY_RANK, value)
+  );
+}
+
 export type EpistemicStatus =
   | 'observed'
   | 'inferred'
@@ -78,7 +85,20 @@ export type EvidenceRole =
   | 'contradicts'
   | 'constrains';
 
+export const EVIDENCE_ROLES: readonly EvidenceRole[] = Object.freeze([
+  'supports',
+  'verifies',
+  'context',
+  'contradicts',
+  'constrains',
+]);
+
+const EVIDENCE_ROLE_SET: ReadonlySet<string> = new Set(EVIDENCE_ROLES);
 const DEFAULT_EVIDENCE_ROLES: readonly EvidenceRole[] = Object.freeze(['supports']);
+
+export function isEvidenceRole(value: unknown): value is EvidenceRole {
+  return typeof value === 'string' && EVIDENCE_ROLE_SET.has(value);
+}
 
 export interface ArtifactRef {
   /** Provider-owned stable location. Raw bytes do not live in the canonical event log. */
