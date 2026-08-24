@@ -21,6 +21,7 @@ import type {
   StateEvidenceRolePolicy,
   StateExplanation,
   StateInvalidation,
+  StateInvalidationRule,
   StateRequest,
   StateRoleRank,
   StateSlotDefinition,
@@ -230,7 +231,9 @@ function chooseGroup(
   const eligible = groups.filter((group) => group.eligible);
   if (eligible.length === 0) return { reason: 'no value group satisfies the state policy' };
   if (eligible.length === 1) {
-    return { selected: eligible[0], reason: 'one value group satisfies the state policy' };
+    const only = eligible[0];
+    if (only === undefined) throw new Error('eligible state group invariant violated');
+    return { selected: only, reason: 'one value group satisfies the state policy' };
   }
 
   if (slot.strategy === 'require-agreement') {
@@ -459,7 +462,7 @@ export function adjudicateState(
   const requestedSlot = slotById.get(request.slotId);
   if (requestedSlot === undefined) throw new Error(`unknown state slot: ${request.slotId}`);
 
-  const incoming = new Map<string, NonNullable<StateAdjudicationSchema['invalidations']>>();
+  const incoming = new Map<string, StateInvalidationRule[]>();
   for (const rule of schema.invalidations ?? []) {
     const bucket = incoming.get(rule.targetSlotId) ?? [];
     bucket.push(rule);
