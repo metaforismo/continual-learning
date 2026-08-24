@@ -1,4 +1,4 @@
-import type { EvidenceRole } from './domain.js';
+import { isEvidenceRole, type EvidenceRole } from './domain.js';
 
 export type MemoryPacketKind =
   | 'state'
@@ -100,12 +100,24 @@ function evidenceRoleFailure(packet: MemoryPacket): string | undefined {
 }
 
 function validateEvidenceMetadata(packet: MemoryPacket): void {
+  if (packet.evidencePacketIds !== undefined) {
+    if (packet.evidencePacketIds.some((id) => id.trim().length === 0)) {
+      throw new Error(`packet ${packet.id} has an empty legacy evidence packet id`);
+    }
+    if (new Set(packet.evidencePacketIds).size !== packet.evidencePacketIds.length) {
+      throw new Error(`packet ${packet.id} repeats a legacy evidence packet id`);
+    }
+  }
+
   if (packet.requiredEvidenceRoles !== undefined) {
     if (packet.requiredEvidenceRoles.length === 0) {
       throw new Error(`packet ${packet.id} requiredEvidenceRoles cannot be empty`);
     }
     if (new Set(packet.requiredEvidenceRoles).size !== packet.requiredEvidenceRoles.length) {
       throw new Error(`packet ${packet.id} requiredEvidenceRoles cannot contain duplicates`);
+    }
+    if (packet.requiredEvidenceRoles.some((role) => !isEvidenceRole(role))) {
+      throw new Error(`packet ${packet.id} requiredEvidenceRoles contains an unknown role`);
     }
   }
 
@@ -123,6 +135,9 @@ function validateEvidenceMetadata(packet: MemoryPacket): void {
     }
     if (new Set(link.roles).size !== link.roles.length) {
       throw new Error(`packet ${packet.id} evidence link ${link.packetId} repeats a role`);
+    }
+    if (link.roles.some((role) => !isEvidenceRole(role))) {
+      throw new Error(`packet ${packet.id} evidence link ${link.packetId} contains an unknown role`);
     }
   }
 }
