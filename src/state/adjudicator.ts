@@ -454,6 +454,9 @@ export function adjudicateState(
   request: StateRequest,
 ): StateDecision {
   validateStateSchema(schema);
+  if (request.view !== 'current' && request.view !== 'historical') {
+    throw new Error('state request view must be current or historical');
+  }
   if (!Number.isFinite(request.validAt)) throw new TypeError('state request validAt must be finite');
   const knownAt = request.knownAt ?? Number.POSITIVE_INFINITY;
   if (Number.isNaN(knownAt)) throw new TypeError('state request knownAt cannot be NaN');
@@ -476,6 +479,32 @@ export function adjudicateState(
   const invalidatedSlots = new Set<string>();
   const maxHops = schema.maxInvalidationHops ?? DEFAULT_MAX_INVALIDATION_HOPS;
   const maxSlots = schema.maxInvalidatedSlots ?? DEFAULT_MAX_INVALIDATED_SLOTS;
+  const transitionCache = new Map<string, boolean>();
+
+  const isReaffirmation = (
+    source: InternalStateDecision,
+    rule: StateInvalidationRule,
+  ): boolean => {
+    if ((rule.trigger ?? 'value-change') === 'new-claim' || source.claim === undefined) {
+      return false;
+    }
+    const cacheKey = `${source.slot.id}\u0000${source.claim.id}`;
+    const cached = transitionCache.get(cacheKey);
+    if (cached !== undefined) return cached;
+
+    const priorValidAt = source.claim.valid.from - 1;
+    const prior = adjudicateState(events, schema, {
+      slotId: source.slot.id,
+      view: request.view,
+      validAt: priorValidAt,
+      ...(request.knownAt === undefined ? {} : { knownAt: request.knownAt }),
+    });
+    const reaffirmation =
+      prior.value !== undefined &&
+      canonicalJson(prior.value) === canonicalJson(source.claim.value);
+    transitionCache.set(cacheKey, reaffirmation);
+    return reaffirmation;
+  };
 
   const resolveSlot = (slotId: string): InternalStateDecision => {
     const cached = memo.get(slotId);
@@ -504,6 +533,7 @@ export function adjudicateState(
       for (const rule of incoming.get(slotId) ?? []) {
         const source = resolveSlot(rule.sourceSlotId);
         if (source.budgetBlocked) budgetBlocked = true;
+        if (isReaffirmation(source, rule)) continue;
         for (const frontier of frontiersForDecision(source)) {
           if (frontier.uncertain && rule.propagateWhenSourceUncertain === false) continue;
           const path = [...frontier.path, rule.id];
