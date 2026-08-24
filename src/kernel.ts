@@ -344,7 +344,7 @@ export class MemoryKernel {
           );
     if (strongestVerifyingEvidence < authorityFloor) {
       throw new Error(
-        `outcome verifier ${data.verifier} lacks explicit verifying evidence with sufficient authority`,
+        `outcome verifier ${data.verifier} lacks evidence with sufficient authority: explicit verifying evidence is required`,
       );
     }
 
