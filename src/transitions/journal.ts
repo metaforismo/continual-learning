@@ -5,7 +5,10 @@ import {
   type TransitionVerificationResult,
   type TransitionVerdict,
 } from './types.js';
-import { verifyTransitionResultIntegrity } from './verifier.js';
+import {
+  snapshotTransitionVerificationResult,
+  verifyTransitionResultIntegrity,
+} from './verifier.js';
 
 const SHA256_PATTERN = /^sha256:[0-9a-f]{64}$/;
 const RISKS: ReadonlySet<string> = new Set<TransitionRisk>([
@@ -28,9 +31,47 @@ export interface TransitionAuditEnvelope {
 }
 
 function snapshotRecord(record: TransitionAuditRecord): TransitionAuditRecord {
+  const {
+    schemaVersion,
+    id,
+    seq,
+    recordedAt,
+    actor,
+    proposalId,
+    proposalDigest,
+    resultDigest,
+    verdict,
+    actualRisk,
+    baseFingerprint,
+    afterFingerprint,
+    appendFingerprint,
+    policyId,
+    policyVersion,
+    policyDigest,
+    verifierId,
+    verifierConfigDigest,
+    findingCodes,
+  } = record;
   return Object.freeze({
-    ...record,
-    findingCodes: Object.freeze([...record.findingCodes]),
+    schemaVersion,
+    id,
+    seq,
+    recordedAt,
+    actor,
+    proposalId,
+    proposalDigest,
+    resultDigest,
+    verdict,
+    actualRisk,
+    baseFingerprint,
+    ...(afterFingerprint === undefined ? {} : { afterFingerprint }),
+    ...(appendFingerprint === undefined ? {} : { appendFingerprint }),
+    policyId,
+    policyVersion,
+    policyDigest,
+    verifierId,
+    verifierConfigDigest,
+    findingCodes: Object.freeze([...findingCodes]),
   });
 }
 
@@ -72,11 +113,17 @@ function validateRecord(
   if (record.afterFingerprint !== undefined && !SHA256_PATTERN.test(record.afterFingerprint)) {
     throw new Error('transition audit afterFingerprint must be a SHA-256 content address');
   }
+  if (record.appendFingerprint !== undefined && !SHA256_PATTERN.test(record.appendFingerprint)) {
+    throw new Error('transition audit appendFingerprint must be a SHA-256 content address');
+  }
   if (!VERDICTS.has(record.verdict) || !RISKS.has(record.actualRisk)) {
     throw new Error('transition audit verdict or risk is invalid');
   }
-  if (record.verdict === 'accept' && record.afterFingerprint === undefined) {
-    throw new Error('accepted transition audit records require an afterFingerprint');
+  if (
+    record.verdict === 'accept' &&
+    (record.afterFingerprint === undefined || record.appendFingerprint === undefined)
+  ) {
+    throw new Error('accepted transition audit records require after and append fingerprints');
   }
   if (
     record.policyId.trim().length === 0 ||
@@ -84,6 +131,12 @@ function validateRecord(
     record.verifierId.trim().length === 0
   ) {
     throw new Error('transition audit policy and verifier identity are required');
+  }
+  if (
+    !SHA256_PATTERN.test(record.policyDigest) ||
+    !SHA256_PATTERN.test(record.verifierConfigDigest)
+  ) {
+    throw new Error('transition audit policy and verifier configuration require SHA-256 digests');
   }
   if (
     record.findingCodes.some((code) => code.trim().length === 0) ||
@@ -117,7 +170,8 @@ export class TransitionAuditJournal {
     envelope: TransitionAuditEnvelope,
     result: TransitionVerificationResult,
   ): TransitionAuditRecord {
-    if (!verifyTransitionResultIntegrity(result)) {
+    const resultSnapshot = snapshotTransitionVerificationResult(result);
+    if (!verifyTransitionResultIntegrity(resultSnapshot)) {
       throw new Error('cannot audit a transition result that fails integrity checks');
     }
     const record = snapshotRecord({
@@ -126,20 +180,25 @@ export class TransitionAuditJournal {
       seq: this.#records.length + 1,
       recordedAt: envelope.recordedAt,
       actor: envelope.actor,
-      proposalId: result.proposalId,
-      proposalDigest: result.proposalDigest,
-      resultDigest: result.resultDigest,
-      verdict: result.verdict,
-      actualRisk: result.actualRisk,
-      baseFingerprint: result.baseFingerprint,
-      ...(result.afterFingerprint === undefined
+      proposalId: resultSnapshot.proposalId,
+      proposalDigest: resultSnapshot.proposalDigest,
+      resultDigest: resultSnapshot.resultDigest,
+      verdict: resultSnapshot.verdict,
+      actualRisk: resultSnapshot.actualRisk,
+      baseFingerprint: resultSnapshot.baseFingerprint,
+      ...(resultSnapshot.afterFingerprint === undefined
         ? {}
-        : { afterFingerprint: result.afterFingerprint }),
-      policyId: result.policyId,
-      policyVersion: result.policyVersion,
-      verifierId: result.verifier.id,
+        : { afterFingerprint: resultSnapshot.afterFingerprint }),
+      ...(resultSnapshot.appendFingerprint === undefined
+        ? {}
+        : { appendFingerprint: resultSnapshot.appendFingerprint }),
+      policyId: resultSnapshot.policyId,
+      policyVersion: resultSnapshot.policyVersion,
+      policyDigest: resultSnapshot.policyDigest,
+      verifierId: resultSnapshot.verifier.id,
+      verifierConfigDigest: resultSnapshot.verifier.configDigest,
       findingCodes: Object.freeze(
-        [...new Set(result.findings.map((item) => item.code))].sort(),
+        [...new Set(resultSnapshot.findings.map((item) => item.code))].sort(),
       ),
     });
     this.#accept(record);

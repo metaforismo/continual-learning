@@ -3,11 +3,8 @@ import { createHash } from 'node:crypto';
 import { ClaimProjection } from '../claims.js';
 import {
   AUTHORITY_RANK,
-  evidenceRoles,
-  type ClaimLifecycle,
+  claimKeyToString,
   type ClaimRecord,
-  type EvidenceAvailability,
-  type EvidenceRef,
   type MemoryEvent,
   type MemoryEventInput,
 } from '../domain.js';
@@ -19,7 +16,6 @@ import type {
   StateSnapshotExpectation,
   StateSnapshotObservation,
   TransitionDelta,
-  TransitionExternalCheck,
   TransitionExternalCheckKind,
   TransitionFinding,
   TransitionFindingCategory,
@@ -40,6 +36,12 @@ const RISK_RANK: Readonly<Record<TransitionRisk, number>> = Object.freeze({
   destructive: 3,
 });
 const RISKS: ReadonlySet<string> = new Set(Object.keys(RISK_RANK));
+const RISK_ORDER: readonly TransitionRisk[] = Object.freeze([
+  'low',
+  'medium',
+  'high',
+  'destructive',
+]);
 const VERDICTS = new Set(['accept', 'quarantine', 'human-review', 'reject']);
 const STATE_IMPACTS = new Set(['none', 'declared', 'unknown']);
 const CHECK_KINDS: ReadonlySet<string> = new Set<TransitionExternalCheckKind>([
@@ -59,19 +61,27 @@ const EVENT_TYPES: ReadonlySet<string> = new Set<MemoryEvent['type']>([
   'association.added',
   'outcome.recorded',
 ]);
-
+const HIGH_REQUIRED_CHECKS: readonly TransitionExternalCheckKind[] = Object.freeze([
+  'semantic-faithfulness',
+]);
+const DESTRUCTIVE_REQUIRED_CHECKS: readonly TransitionExternalCheckKind[] = Object.freeze([
+  'semantic-faithfulness',
+  'semantic-preservation',
+  'security',
+]);
 export const DEFAULT_TRANSITION_POLICY: Readonly<TransitionVerificationPolicy> = Object.freeze({
   id: 'transition-verifier/default',
   version: '1',
   maxOperations: 64,
+  maxAuthorizedScopes: 32,
+  maxInputEvidence: 512,
+  maxExternalChecks: 64,
+  maxStateExpectations: 64,
+  maxProposalCharacters: 1_000_000,
   requireIndependentVerifier: true,
   requiredExternalChecks: Object.freeze({
-    high: Object.freeze(['semantic-faithfulness']),
-    destructive: Object.freeze([
-      'semantic-faithfulness',
-      'semantic-preservation',
-      'security',
-    ]),
+    high: HIGH_REQUIRED_CHECKS,
+    destructive: DESTRUCTIVE_REQUIRED_CHECKS,
   }),
   humanReviewAtOrAbove: 'destructive',
   taintedActiveWritesRequireSecurityCheck: true,
@@ -119,8 +129,28 @@ function canonicalJson(value: unknown, path = '$', ancestors = new WeakSet<objec
   throw new TypeError(`${path} contains a non-JSON value`);
 }
 
+function digestCanonical(canonical: string): string {
+  return `sha256:${createHash('sha256').update(canonical).digest('hex')}`;
+}
+
 function digest(value: unknown): string {
-  return `sha256:${createHash('sha256').update(canonicalJson(value)).digest('hex')}`;
+  return digestCanonical(canonicalJson(value));
+}
+
+function deepFreeze<T>(value: T): T {
+  if (value === null || typeof value !== 'object' || Object.isFrozen(value)) return value;
+  for (const key of Object.keys(value)) {
+    deepFreeze((value as Record<string, unknown>)[key]);
+  }
+  return Object.freeze(value);
+}
+
+function snapshotCanonical<T>(canonical: string): T {
+  return deepFreeze(JSON.parse(canonical) as T);
+}
+
+function canonicalSnapshot<T>(value: T): T {
+  return snapshotCanonical<T>(canonicalJson(value));
 }
 
 function uniqueSorted(values: readonly string[]): readonly string[] {
@@ -155,10 +185,44 @@ function maxRisk(left: TransitionRisk, right: TransitionRisk): TransitionRisk {
   return RISK_RANK[left] >= RISK_RANK[right] ? left : right;
 }
 
+function exceedsProposalResourceLimits(
+  proposal: TransitionProposal,
+  policy: TransitionVerificationPolicy,
+  proposalCharacters: number,
+): boolean {
+  return (
+    proposalCharacters > policy.maxProposalCharacters ||
+    proposal.operations.length > policy.maxOperations ||
+    proposal.authorizedScopes.length > policy.maxAuthorizedScopes ||
+    proposal.inputEvidenceIds.length > policy.maxInputEvidence ||
+    proposal.ignoredInputEvidence.length > policy.maxInputEvidence ||
+    proposal.externalChecks.length > policy.maxExternalChecks ||
+    proposal.stateExpectations.length > policy.maxStateExpectations
+  );
+}
+
 function riskForOperation(operation: MemoryEventInput): TransitionRisk {
   switch (operation.type) {
-    case 'evidence.captured':
-      return operation.data.evidence.derivedFrom.length === 0 ? 'low' : 'medium';
+    case 'evidence.captured': {
+      const evidence = operation.data.evidence;
+      if (
+        evidence.sensitivity === 'secret' ||
+        evidence.sensitivity === 'sensitive' ||
+        evidence.taints.includes('secret-detected')
+      ) {
+        return 'high';
+      }
+      if (
+        evidence.sensitivity === 'personal' ||
+        evidence.derivedFrom.length > 0 ||
+        evidence.taints.includes('prompt-like') ||
+        evidence.taints.includes('untrusted-source') ||
+        evidence.taints.includes('model-generated')
+      ) {
+        return 'medium';
+      }
+      return 'low';
+    }
     case 'evidence.availability-changed':
       return operation.data.availability === 'deleted' ? 'destructive' : 'high';
     case 'claim.asserted':
@@ -170,18 +234,101 @@ function riskForOperation(operation: MemoryEventInput): TransitionRisk {
       return 'destructive';
     case 'association.added':
     case 'outcome.recorded':
-      return 'medium';
+      return 'high';
   }
+  return 'destructive';
 }
 
-function operationCanChangeAuthorizedState(operation: MemoryEventInput): boolean {
-  return (
-    operation.type === 'claim.admitted' ||
-    operation.type === 'claim.superseded' ||
-    operation.type === 'claim.revoked' ||
-    operation.type === 'evidence.availability-changed' ||
-    (operation.type === 'claim.asserted' && operation.data.initialLifecycle === 'active')
+interface AffectedStateImpact {
+  readonly key: string;
+  readonly effectiveAt: number;
+  readonly validUntil?: number;
+}
+
+function affectedStateImpacts(
+  proposal: TransitionProposal,
+  beforeEvents: readonly MemoryEvent[],
+  afterEvents: readonly MemoryEvent[],
+): readonly AffectedStateImpact[] {
+  const beforeClaims = ClaimProjection.from(beforeEvents);
+  const afterClaims = ClaimProjection.from(afterEvents);
+  const allClaims = new Map<string, ClaimRecord>();
+  for (const event of afterEvents) {
+    if (event.type === 'claim.asserted') allClaims.set(event.data.claim.id, event.data.claim);
+  }
+
+  const impacts = new Map<string, AffectedStateImpact>();
+  const addClaim = (claim: ClaimRecord | undefined, effectiveAt?: number): void => {
+    if (claim === undefined) return;
+    const key = claimKeyToString(claim.key);
+    const next: AffectedStateImpact = Object.freeze({
+      key,
+      effectiveAt: effectiveAt ?? claim.valid.from,
+      ...(claim.valid.to === undefined ? {} : { validUntil: claim.valid.to }),
+    });
+    const current = impacts.get(key);
+    if (current === undefined || next.effectiveAt >= current.effectiveAt) impacts.set(key, next);
+  };
+
+  for (const operation of proposal.operations) {
+    switch (operation.type) {
+      case 'claim.asserted':
+        if (operation.data.initialLifecycle === 'active') addClaim(operation.data.claim);
+        break;
+      case 'claim.admitted':
+        addClaim(afterClaims.get(operation.data.claimId));
+        break;
+      case 'claim.superseded':
+        addClaim(
+          afterClaims.get(operation.data.replacementClaimId) ??
+            beforeClaims.get(operation.data.previousClaimId),
+          operation.data.effectiveAt,
+        );
+        break;
+      case 'claim.revoked':
+        addClaim(beforeClaims.get(operation.data.claimId));
+        break;
+      case 'evidence.availability-changed':
+        for (const claim of allClaims.values()) {
+          if (!claim.evidence.some((reference) => reference.sourceId === operation.data.evidenceId)) {
+            continue;
+          }
+          const beforeLifecycle = beforeClaims.lifecycle(claim.id);
+          const afterLifecycle = afterClaims.lifecycle(claim.id);
+          const canGovern = [beforeLifecycle, afterLifecycle].some(
+            (lifecycle) => lifecycle === 'active' || lifecycle === 'superseded',
+          );
+          if (canGovern) addClaim(claim);
+        }
+        break;
+      case 'evidence.captured':
+      case 'association.added':
+      case 'outcome.recorded':
+        break;
+    }
+  }
+  return Object.freeze([...impacts.values()].sort((left, right) => left.key.localeCompare(right.key)));
+}
+
+function expectationCoversImpact(
+  expectation: TransitionStateExpectation,
+  impact: AffectedStateImpact,
+): boolean {
+  if (expectation.request.knownAt !== undefined) return false;
+  const slot = expectation.schema.slots.find(
+    (candidate) => candidate.id === expectation.request.slotId,
   );
+  if (slot === undefined || claimKeyToString(slot.key) !== impact.key) return false;
+  if (expectation.request.validAt < impact.effectiveAt) return false;
+  if (
+    impact.validUntil !== undefined &&
+    expectation.request.validAt >= impact.validUntil
+  ) {
+    return false;
+  }
+  return expectation.mode === 'change' ||
+    expectation.mode === 'preserve' ||
+    expectation.after !== undefined;
 }
 
 function validateVerifierIdentity(
@@ -235,15 +382,25 @@ function validatePolicy(policy: TransitionVerificationPolicy, findings: Transiti
       ),
     );
   }
-  if (!Number.isInteger(policy.maxOperations) || policy.maxOperations <= 0) {
-    findings.push(
-      finding(
-        'transition-policy-max-operations-invalid',
-        'verification',
-        'error',
-        'transition policy maxOperations must be a positive integer',
-      ),
-    );
+  const positiveLimits: readonly [keyof TransitionVerificationPolicy, unknown][] = [
+    ['maxOperations', policy.maxOperations],
+    ['maxAuthorizedScopes', policy.maxAuthorizedScopes],
+    ['maxInputEvidence', policy.maxInputEvidence],
+    ['maxExternalChecks', policy.maxExternalChecks],
+    ['maxStateExpectations', policy.maxStateExpectations],
+    ['maxProposalCharacters', policy.maxProposalCharacters],
+  ];
+  for (const [name, value] of positiveLimits) {
+    if (!Number.isInteger(value) || (value as number) <= 0) {
+      findings.push(
+        finding(
+          'transition-policy-resource-limit-invalid',
+          'verification',
+          'error',
+          `transition policy ${String(name)} must be a positive integer`,
+        ),
+      );
+    }
   }
   if (
     policy.requireIndependentVerifier !== undefined &&
@@ -346,6 +503,7 @@ function validateProposal(
   proposal: TransitionProposal,
   policy: TransitionVerificationPolicy,
   findings: TransitionFinding[],
+  proposalCharacters: number,
 ): void {
   if (proposal.id.trim().length === 0) {
     findings.push(finding('transition-id-empty', 'structure', 'error', 'proposal id cannot be empty'));
@@ -382,6 +540,59 @@ function validateProposal(
         'scope',
         'error',
         'proposal requires at least one authorized scope',
+      ),
+    );
+  }
+  if (proposalCharacters > policy.maxProposalCharacters) {
+    findings.push(
+      finding(
+        'transition-proposal-size-exceeded',
+        'structure',
+        'error',
+        `canonical proposal size ${proposalCharacters} exceeds ${policy.maxProposalCharacters} characters`,
+      ),
+    );
+  }
+  if (proposal.authorizedScopes.length > policy.maxAuthorizedScopes) {
+    findings.push(
+      finding(
+        'transition-authorized-scope-limit-exceeded',
+        'scope',
+        'error',
+        `proposal exceeds the ${policy.maxAuthorizedScopes} authorized-scope limit`,
+      ),
+    );
+  }
+  if (
+    proposal.inputEvidenceIds.length > policy.maxInputEvidence ||
+    proposal.ignoredInputEvidence.length > policy.maxInputEvidence
+  ) {
+    findings.push(
+      finding(
+        'transition-input-evidence-limit-exceeded',
+        'coverage',
+        'error',
+        `proposal exceeds the ${policy.maxInputEvidence} input-evidence limit`,
+      ),
+    );
+  }
+  if (proposal.externalChecks.length > policy.maxExternalChecks) {
+    findings.push(
+      finding(
+        'transition-external-check-limit-exceeded',
+        'verification',
+        'error',
+        `proposal exceeds the ${policy.maxExternalChecks} external-check limit`,
+      ),
+    );
+  }
+  if (proposal.stateExpectations.length > policy.maxStateExpectations) {
+    findings.push(
+      finding(
+        'transition-state-expectation-limit-exceeded',
+        'preservation',
+        'error',
+        `proposal exceeds the ${policy.maxStateExpectations} state-expectation limit`,
       ),
     );
   }
@@ -564,6 +775,9 @@ function applyOperation(kernel: MemoryKernel, operation: MemoryEventInput): Memo
     case 'outcome.recorded':
       return kernel.recordOutcome(envelope, operation.data);
   }
+  throw new Error(
+    `unsupported transition event type: ${String((operation as { readonly type?: unknown }).type)}`,
+  );
 }
 
 function claimIds(events: readonly MemoryEvent[]): readonly string[] {
@@ -773,6 +987,7 @@ function evidenceUsedByProposal(
   for (const operation of proposal.operations) {
     switch (operation.type) {
       case 'evidence.captured':
+        used.add(operation.data.evidence.id);
         for (const id of operation.data.evidence.derivedFrom) used.add(id);
         break;
       case 'claim.asserted':
@@ -795,6 +1010,8 @@ function evidenceUsedByProposal(
         for (const reference of operation.data.evidence) used.add(reference.sourceId);
         break;
       case 'evidence.availability-changed':
+        used.add(operation.data.evidenceId);
+        break;
       case 'claim.revoked':
         break;
     }
@@ -831,6 +1048,19 @@ function verifyCoverage(
         ),
       );
     }
+  }
+
+  const undeclaredUsed = [...used].filter((sourceId) => !input.has(sourceId));
+  if (undeclaredUsed.length > 0) {
+    findings.push(
+      finding(
+        'transition-used-evidence-not-declared',
+        'coverage',
+        'error',
+        'every evidence source used by the transition must be declared in inputEvidenceIds',
+        undeclaredUsed,
+      ),
+    );
   }
 
   for (const sourceId of proposal.inputEvidenceIds) {
@@ -920,7 +1150,13 @@ function validateExternalChecks(
 } {
   const evidence = EvidenceProjection.from(afterEvents);
   const passedKinds = new Set<TransitionExternalCheckKind>();
-  const operationActors = new Set(proposal.operations.map((operation) => operation.actor));
+  // A verifier may capture its own report evidence inside the staged transaction. Independence is
+  // measured against actors that author derived memory mutations, not raw evidence capture.
+  const mutationActors = new Set(
+    proposal.operations
+      .filter((operation) => operation.type !== 'evidence.captured')
+      .map((operation) => operation.actor),
+  );
   let hasHumanPass = false;
 
   for (const check of proposal.externalChecks) {
@@ -962,6 +1198,17 @@ function validateExternalChecks(
         ),
       );
     }
+    if (!check.subjectIds.includes(proposal.id)) {
+      findings.push(
+        finding(
+          'transition-external-check-subject-mismatch',
+          'verification',
+          'error',
+          'external checks must explicitly cover the transition proposal id',
+          [check.id, proposal.id],
+        ),
+      );
+    }
     if (check.evidence.length === 0) {
       findings.push(
         finding(
@@ -974,7 +1221,8 @@ function validateExternalChecks(
       );
     }
 
-    let strongest = -1;
+    let strongestBoundReportAuthority = -1;
+    let reportDigestMatched = false;
     for (const reference of check.evidence) {
       const projected = evidence.get(reference.sourceId);
       if (!evidence.validatesReference(reference) || projected === undefined) {
@@ -989,7 +1237,8 @@ function validateExternalChecks(
         );
         continue;
       }
-      if (reference.roles?.includes('verifies') !== true) {
+      const explicitlyVerifies = reference.roles?.includes('verifies') === true;
+      if (!explicitlyVerifies) {
         findings.push(
           finding(
             'transition-external-check-role-invalid',
@@ -998,6 +1247,13 @@ function validateExternalChecks(
             'external check evidence must explicitly use the verifies role',
             [check.id, reference.sourceId],
           ),
+        );
+      }
+      if (explicitlyVerifies && reference.contentHash === check.reportDigest) {
+        reportDigestMatched = true;
+        strongestBoundReportAuthority = Math.max(
+          strongestBoundReportAuthority,
+          AUTHORITY_RANK[projected.record.authority],
         );
       }
       if (
@@ -1014,9 +1270,19 @@ function validateExternalChecks(
           ),
         );
       }
-      strongest = Math.max(strongest, AUTHORITY_RANK[projected.record.authority]);
     }
-    if (strongest < authorityFloorForVerifier(check.verifier)) {
+    if (!reportDigestMatched) {
+      findings.push(
+        finding(
+          'transition-external-check-report-unbound',
+          'verification',
+          'error',
+          'external check reportDigest must match explicit verifying evidence',
+          [check.id],
+        ),
+      );
+    }
+    if (strongestBoundReportAuthority < authorityFloorForVerifier(check.verifier)) {
       findings.push(
         finding(
           'transition-external-check-authority-insufficient',
@@ -1030,7 +1296,7 @@ function validateExternalChecks(
 
     if (
       (policy.requireIndependentVerifier ?? true) &&
-      (check.verifier.actor === proposal.proposer || operationActors.has(check.verifier.actor))
+      (check.verifier.actor === proposal.proposer || mutationActors.has(check.verifier.actor))
     ) {
       findings.push(
         finding(
@@ -1071,7 +1337,7 @@ function validateExternalChecks(
 
   if (
     (policy.requireIndependentVerifier ?? true) &&
-    (verifier.actor === proposal.proposer || operationActors.has(verifier.actor))
+    (verifier.actor === proposal.proposer || mutationActors.has(verifier.actor))
   ) {
     findings.push(
       finding(
@@ -1087,8 +1353,19 @@ function validateExternalChecks(
   return Object.freeze({ passedKinds, hasHumanPass });
 }
 
-function snapshotFor(events: readonly MemoryEvent[], expectation: TransitionStateExpectation): StateSnapshotObservation {
-  const decision = adjudicateState(events, expectation.schema, expectation.request);
+function snapshotFor(
+  events: readonly MemoryEvent[],
+  expectation: TransitionStateExpectation,
+): StateSnapshotObservation {
+  const request = {
+    slotId: expectation.request.slotId,
+    view: expectation.request.view,
+    validAt: expectation.request.validAt,
+    ...(expectation.request.premise === undefined
+      ? {}
+      : { premise: expectation.request.premise }),
+  };
+  const decision = adjudicateState(events, expectation.schema, request);
   return Object.freeze({
     status: decision.status,
     ...(decision.value === undefined ? {} : { value: decision.value }),
@@ -1124,6 +1401,9 @@ function verifyStateExpectations(
   for (const expectation of proposal.stateExpectations) {
     const reasons: string[] = [];
     if (expectation.id.trim().length === 0) reasons.push('state expectation id cannot be empty');
+    if (expectation.request.knownAt !== undefined) {
+      reasons.push('transition state expectations cannot override transaction time with knownAt');
+    }
     if (!['assert', 'preserve', 'change'].includes(expectation.mode)) {
       reasons.push('state expectation mode is invalid');
     }
@@ -1196,25 +1476,47 @@ function activeClaimIds(proposal: TransitionProposal): readonly string[] {
   return uniqueSorted(ids);
 }
 
-function hasTaintedActiveWrite(
+function evidenceReferencesAreTainted(
+  references: readonly { readonly sourceId: string }[],
+  evidence: EvidenceProjection,
+): boolean {
+  return references.some((reference) => {
+    const record = evidence.get(reference.sourceId)?.record;
+    return (
+      record?.taints.includes('prompt-like') === true ||
+      record?.taints.includes('untrusted-source') === true ||
+      record?.taints.includes('secret-detected') === true
+    );
+  });
+}
+
+function taintedAuthoritativeWriteIds(
   proposal: TransitionProposal,
   afterEvents: readonly MemoryEvent[],
 ): readonly string[] {
   const claims = ClaimProjection.from(afterEvents);
   const evidence = EvidenceProjection.from(afterEvents);
   const tainted: string[] = [];
+
   for (const claimId of activeClaimIds(proposal)) {
     const claim = claims.get(claimId);
-    if (claim === undefined) continue;
-    const dangerous = claim.evidence.some((reference) => {
-      const record = evidence.get(reference.sourceId)?.record;
-      return (
-        record?.taints.includes('prompt-like') === true ||
-        record?.taints.includes('untrusted-source') === true ||
-        record?.taints.includes('secret-detected') === true
-      );
-    });
-    if (dangerous) tainted.push(claimId);
+    if (claim !== undefined && evidenceReferencesAreTainted(claim.evidence, evidence)) {
+      tainted.push(claimId);
+    }
+  }
+  for (const operation of proposal.operations) {
+    if (
+      operation.type === 'association.added' &&
+      evidenceReferencesAreTainted(operation.data.association.evidence, evidence)
+    ) {
+      tainted.push(operation.data.association.id);
+    }
+    if (
+      operation.type === 'outcome.recorded' &&
+      evidenceReferencesAreTainted(operation.data.evidence, evidence)
+    ) {
+      tainted.push(operation.id);
+    }
   }
   return uniqueSorted(tainted);
 }
@@ -1223,11 +1525,34 @@ function requiredChecksForRisk(
   policy: TransitionVerificationPolicy,
   risk: TransitionRisk,
 ): readonly TransitionExternalCheckKind[] {
-  return Object.freeze([...(policy.requiredExternalChecks?.[risk] ?? [])]);
+  const required = new Set<TransitionExternalCheckKind>();
+  for (const candidate of RISK_ORDER) {
+    if (RISK_RANK[candidate] > RISK_RANK[risk]) break;
+    for (const kind of policy.requiredExternalChecks?.[candidate] ?? []) required.add(kind);
+  }
+  return Object.freeze([...required]);
+}
+
+function transitionSpecificRequiredChecks(
+  proposal: TransitionProposal,
+): readonly TransitionExternalCheckKind[] {
+  const required = new Set<TransitionExternalCheckKind>();
+  for (const operation of proposal.operations) {
+    if (operation.type !== 'evidence.captured') continue;
+    const evidence = operation.data.evidence;
+    if (
+      evidence.sensitivity === 'sensitive' ||
+      evidence.sensitivity === 'secret' ||
+      evidence.taints.includes('secret-detected')
+    ) {
+      required.add('security');
+    }
+  }
+  return Object.freeze([...required]);
 }
 
 function resultPayload(
-  result: Omit<TransitionVerificationResult, 'resultDigest' | 'stagedEvents'>,
+  result: Omit<TransitionVerificationResult, 'resultDigest' | 'stagedAppend'>,
 ): unknown {
   return result;
 }
@@ -1239,27 +1564,43 @@ export function fingerprintMemoryEvents(events: readonly MemoryEvent[]): string 
 
 export function verifyTransition(
   beforeEvents: readonly MemoryEvent[],
-  proposal: TransitionProposal,
-  verifier: TransitionVerifierIdentity,
-  policy: TransitionVerificationPolicy = DEFAULT_TRANSITION_POLICY,
+  proposalInput: TransitionProposal,
+  verifierInput: TransitionVerifierIdentity,
+  policyInput: TransitionVerificationPolicy = DEFAULT_TRANSITION_POLICY,
 ): TransitionVerificationResult {
-  const proposalDigest = digest(proposal);
-  const policyDigest = digest(policy);
+  // Snapshot each caller-controlled object exactly once. Validation, risk analysis, staging, and
+  // result construction must operate on the same bytes that were content-addressed.
+  const proposalCanonical = canonicalJson(proposalInput);
+  const verifierCanonical = canonicalJson(verifierInput);
+  const policyCanonical = canonicalJson(policyInput);
+  const proposal = snapshotCanonical<TransitionProposal>(proposalCanonical);
+  const verifier = snapshotCanonical<TransitionVerifierIdentity>(verifierCanonical);
+  const policy = snapshotCanonical<TransitionVerificationPolicy>(policyCanonical);
+  const proposalDigest = digestCanonical(proposalCanonical);
+  const policyDigest = digestCanonical(policyCanonical);
   const findings: TransitionFinding[] = [];
   validatePolicy(policy, findings);
-  validateProposal(proposal, policy, findings);
+  validateProposal(proposal, policy, findings, proposalCanonical.length);
   validateVerifierIdentity(verifier, 'primary verifier', findings);
 
   let baseFingerprint = digest(beforeEvents);
   let stagedEvents: readonly MemoryEvent[] | undefined;
+  let stagedAppend: readonly MemoryEvent[] | undefined;
   let afterFingerprint: string | undefined;
+  let appendFingerprint: string | undefined;
   let delta: TransitionDelta | undefined;
   let stateObservations: readonly TransitionStateObservation[] = Object.freeze([]);
   let actualRisk: TransitionRisk = 'low';
+  const resourceLimitsExceeded = exceedsProposalResourceLimits(
+    proposal,
+    policy,
+    proposalCanonical.length,
+  );
 
-  for (const operation of proposal.operations) {
+  for (const operation of proposal.operations.slice(0, policy.maxOperations)) {
     actualRisk = maxRisk(actualRisk, riskForOperation(operation));
   }
+  if (proposal.operations.length > policy.maxOperations) actualRisk = 'destructive';
   if (RISK_RANK[proposal.declaredRisk] < RISK_RANK[actualRisk]) {
     findings.push(
       finding(
@@ -1285,18 +1626,24 @@ export function verifyTransition(
       );
     }
 
-    if (proposal.operations.length > 0 && proposal.operations.length <= policy.maxOperations) {
+    if (
+      !resourceLimitsExceeded &&
+      proposal.operations.length > 0 &&
+      proposal.operations.length <= policy.maxOperations
+    ) {
       const staged = MemoryKernel.from(baseKernel.events());
       for (const operation of proposal.operations) applyOperation(staged, operation);
       stagedEvents = staged.events();
+      stagedAppend = Object.freeze(stagedEvents.slice(baseKernel.events().length));
       afterFingerprint = digest(stagedEvents);
+      appendFingerprint = digest(stagedAppend);
       delta = computeDelta(baseKernel.events(), stagedEvents, proposal.operations);
       verifyProjectionPreservation(proposal, delta, baseKernel.events(), findings);
       verifyCoverage(proposal, stagedEvents, findings);
 
       const allowedScopes = new Set(proposal.authorizedScopes);
       const unauthorizedScopes = delta.touchedScopes.filter(
-        (scope) => scope !== 'global' && !allowedScopes.has(scope),
+        (scope) => !allowedScopes.has(scope),
       );
       if (unauthorizedScopes.length > 0) {
         findings.push(
@@ -1310,26 +1657,53 @@ export function verifyTransition(
         );
       }
 
-      const stateAffecting = proposal.operations.some(operationCanChangeAuthorizedState);
-      if (stateAffecting && proposal.stateImpact === 'none') {
+      const affectedImpacts = affectedStateImpacts(
+        proposal,
+        baseKernel.events(),
+        stagedEvents,
+      );
+      const affectedKeys = affectedImpacts.map((impact) => impact.key);
+      if (affectedImpacts.length > 0 && proposal.stateImpact === 'none') {
         findings.push(
           finding(
             'transition-state-impact-denied',
             'preservation',
             'error',
-            'proposal declares no state impact but contains state-affecting operations',
+            'proposal declares no state impact but changes an authorized claim key',
+            affectedKeys,
           ),
         );
       }
-      if (proposal.stateImpact === 'declared' && proposal.stateExpectations.length === 0) {
-        findings.push(
-          finding(
-            'transition-state-expectations-missing',
-            'preservation',
-            'error',
-            'declared state impact requires at least one state expectation',
-          ),
-        );
+      if (proposal.stateImpact === 'declared') {
+        const uncoveredKeys = affectedImpacts
+          .filter(
+            (impact) =>
+              !proposal.stateExpectations.some((expectation) =>
+                expectationCoversImpact(expectation, impact),
+              ),
+          )
+          .map((impact) => impact.key);
+        if (affectedImpacts.length > 0 && proposal.stateExpectations.length === 0) {
+          findings.push(
+            finding(
+              'transition-state-expectations-missing',
+              'preservation',
+              'error',
+              'declared state impact requires state expectations for affected claim keys',
+              affectedKeys,
+            ),
+          );
+        } else if (uncoveredKeys.length > 0) {
+          findings.push(
+            finding(
+              'transition-state-impact-coverage-missing',
+              'preservation',
+              'error',
+              'state expectations do not cover every affected claim key at the impact time',
+              uncoveredKeys,
+            ),
+          );
+        }
       }
       stateObservations = verifyStateExpectations(
         proposal,
@@ -1378,7 +1752,11 @@ export function verifyTransition(
   }
 
   let requiresHumanReview = proposal.stateImpact === 'unknown';
-  for (const kind of requiredChecksForRisk(policy, actualRisk)) {
+  const requiredChecks = new Set([
+    ...requiredChecksForRisk(policy, actualRisk),
+    ...transitionSpecificRequiredChecks(proposal),
+  ]);
+  for (const kind of requiredChecks) {
     if (!passedKinds.has(kind)) {
       findings.push(
         finding(
@@ -1415,15 +1793,15 @@ export function verifyTransition(
     stagedEvents !== undefined &&
     (policy.taintedActiveWritesRequireSecurityCheck ?? true)
   ) {
-    const taintedClaims = hasTaintedActiveWrite(proposal, stagedEvents);
-    if (taintedClaims.length > 0 && !passedKinds.has('security')) {
+    const taintedWrites = taintedAuthoritativeWriteIds(proposal, stagedEvents);
+    if (taintedWrites.length > 0 && !passedKinds.has('security')) {
       findings.push(
         finding(
           'transition-tainted-active-write',
           'faithfulness',
           'warning',
-          'active state derived from tainted evidence requires a passing security check',
-          taintedClaims,
+          'authoritative memory derived from tainted evidence requires a passing security check',
+          taintedWrites,
         ),
       );
       requiresQuarantine = true;
@@ -1450,6 +1828,7 @@ export function verifyTransition(
     actualRisk,
     baseFingerprint,
     ...(afterFingerprint === undefined ? {} : { afterFingerprint }),
+    ...(appendFingerprint === undefined ? {} : { appendFingerprint }),
     findings: Object.freeze(findings),
     ...(delta === undefined ? {} : { delta }),
     stateObservations,
@@ -1459,26 +1838,33 @@ export function verifyTransition(
 
   return Object.freeze({
     ...unsigned,
-    ...(stagedEvents === undefined ? {} : { stagedEvents }),
+    ...(stagedAppend === undefined ? {} : { stagedAppend }),
     resultDigest,
   });
 }
 
-export function verifyTransitionResultIntegrity(result: TransitionVerificationResult): boolean {
+export function snapshotTransitionVerificationResult(
+  result: TransitionVerificationResult,
+): TransitionVerificationResult {
+  return canonicalSnapshot(result);
+}
+
+export function verifyTransitionResultIntegrity(resultInput: TransitionVerificationResult): boolean {
   try {
+    const result = snapshotTransitionVerificationResult(resultInput);
     if (!VERDICTS.has(result.verdict) || !isRisk(result.actualRisk)) return false;
     if (!SHA256_PATTERN.test(result.resultDigest)) return false;
     if (!SHA256_PATTERN.test(result.proposalDigest) || !SHA256_PATTERN.test(result.policyDigest)) {
       return false;
     }
     if (!SHA256_PATTERN.test(result.baseFingerprint)) return false;
-    if (result.stagedEvents !== undefined) {
-      if (result.afterFingerprint === undefined) return false;
-      if (fingerprintMemoryEvents(result.stagedEvents) !== result.afterFingerprint) return false;
-    } else if (result.afterFingerprint !== undefined) {
+    if (result.stagedAppend !== undefined) {
+      if (result.afterFingerprint === undefined || result.appendFingerprint === undefined) return false;
+      if (digest(result.stagedAppend) !== result.appendFingerprint) return false;
+    } else if (result.afterFingerprint !== undefined || result.appendFingerprint !== undefined) {
       return false;
     }
-    if (result.verdict === 'accept' && result.stagedEvents === undefined) return false;
+    if (result.verdict === 'accept' && result.stagedAppend === undefined) return false;
 
     const unsigned = {
       proposalId: result.proposalId,
@@ -1491,6 +1877,7 @@ export function verifyTransitionResultIntegrity(result: TransitionVerificationRe
       actualRisk: result.actualRisk,
       baseFingerprint: result.baseFingerprint,
       ...(result.afterFingerprint === undefined ? {} : { afterFingerprint: result.afterFingerprint }),
+      ...(result.appendFingerprint === undefined ? {} : { appendFingerprint: result.appendFingerprint }),
       findings: result.findings,
       ...(result.delta === undefined ? {} : { delta: result.delta }),
       stateObservations: result.stateObservations,
@@ -1503,11 +1890,11 @@ export function verifyTransitionResultIntegrity(result: TransitionVerificationRe
 }
 
 /**
- * Commit by returning a new kernel. The caller's kernel is never mutated, so a failed multi-event
- * transition cannot leave a partial prefix in memory. Durable providers must implement the same
- * base-fingerprint compare-and-swap inside one database transaction.
+ * Apply one accepted result after an owning verifier runtime has checked its issuance capability.
+ * The caller's kernel is never mutated, so a failed multi-event transition cannot leave a partial
+ * prefix in memory. Durable providers must implement the same compare-and-swap atomically.
  */
-export function commitVerifiedTransition(
+function commitTransitionResult(
   current: MemoryKernel,
   result: TransitionVerificationResult,
 ): MemoryKernel {
@@ -1522,11 +1909,73 @@ export function commitVerifiedTransition(
   if (currentFingerprint !== result.baseFingerprint) {
     throw new Error('transition base is stale; canonical memory changed after verification');
   }
-  const staged = result.stagedEvents;
-  if (staged === undefined) throw new Error('accepted transition has no staged event stream');
-  const stagedPrefix = staged.slice(0, currentEvents.length);
-  if (fingerprintMemoryEvents(stagedPrefix) !== result.baseFingerprint) {
-    throw new Error('staged transition does not preserve the canonical prefix');
+  const stagedAppend = result.stagedAppend;
+  if (stagedAppend === undefined) throw new Error('accepted transition has no staged append');
+  const committed = MemoryKernel.from([...currentEvents, ...stagedAppend]);
+  if (fingerprintMemoryEvents(committed.events()) !== result.afterFingerprint) {
+    throw new Error('staged append does not produce the verified after fingerprint');
   }
-  return MemoryKernel.from(staged);
+  return committed;
+}
+
+/**
+ * Capability-style transition verifier owned by the trusted host.
+ *
+ * Policy and verifier identity are canonicalized and frozen at construction. Only results issued by
+ * this exact runtime instance may pass its `commit` method. The host must keep both the kernel and
+ * this capability out of untrusted plugin/model code; the library is not an OS process boundary.
+ */
+export class TransitionVerifier {
+  readonly #policy: TransitionVerificationPolicy;
+  readonly #verifier: TransitionVerifierIdentity;
+  readonly #issued = new WeakSet<object>();
+
+  constructor(
+    verifier: TransitionVerifierIdentity,
+    policy: TransitionVerificationPolicy = DEFAULT_TRANSITION_POLICY,
+  ) {
+    const verifierSnapshot = canonicalSnapshot(verifier);
+    const policySnapshot = canonicalSnapshot(policy);
+    const findings: TransitionFinding[] = [];
+    validateVerifierIdentity(verifierSnapshot, 'transition verifier', findings);
+    validatePolicy(policySnapshot, findings);
+    const errors = findings.filter((item) => item.severity === 'error');
+    if (errors.length > 0) {
+      throw new Error(
+        `invalid transition verifier configuration: ${errors.map((item) => item.message).join('; ')}`,
+      );
+    }
+    this.#verifier = verifierSnapshot;
+    this.#policy = policySnapshot;
+  }
+
+  get verifier(): TransitionVerifierIdentity {
+    return this.#verifier;
+  }
+
+  get policy(): TransitionVerificationPolicy {
+    return this.#policy;
+  }
+
+  verify(
+    beforeEvents: readonly MemoryEvent[],
+    proposal: TransitionProposal,
+  ): TransitionVerificationResult {
+    const result = verifyTransition(beforeEvents, proposal, this.#verifier, this.#policy);
+    this.#issued.add(result);
+    return result;
+  }
+
+  commit(current: MemoryKernel, result: TransitionVerificationResult): MemoryKernel {
+    if (!this.#issued.has(result)) {
+      throw new Error('transition result was not issued by this verifier runtime');
+    }
+    if (
+      result.policyDigest !== digest(this.#policy) ||
+      digest(result.verifier) !== digest(this.#verifier)
+    ) {
+      throw new Error('transition result does not match this verifier configuration');
+    }
+    return commitTransitionResult(current, result);
+  }
 }

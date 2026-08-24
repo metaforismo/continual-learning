@@ -92,6 +92,12 @@ export interface TransitionVerificationPolicy {
   readonly id: string;
   readonly version: string;
   readonly maxOperations: number;
+  readonly maxAuthorizedScopes: number;
+  readonly maxInputEvidence: number;
+  readonly maxExternalChecks: number;
+  readonly maxStateExpectations: number;
+  /** Maximum canonical JSON characters after the host-level raw request-size gate. */
+  readonly maxProposalCharacters: number;
   readonly allowedEventTypes?: readonly MemoryEvent['type'][];
   readonly requireIndependentVerifier?: boolean;
   readonly requiredExternalChecks?: TransitionRequiredChecks;
@@ -177,12 +183,13 @@ export interface TransitionVerificationResult {
   readonly actualRisk: TransitionRisk;
   readonly baseFingerprint: string;
   readonly afterFingerprint?: string;
+  readonly appendFingerprint?: string;
   readonly findings: readonly TransitionFinding[];
   readonly delta?: TransitionDelta;
   readonly stateObservations: readonly TransitionStateObservation[];
   readonly externalCheckIds: readonly string[];
-  /** Complete staged canonical stream. Present only when semantic replay succeeded. */
-  readonly stagedEvents?: readonly MemoryEvent[];
+  /** Newly staged canonical events only. The historical prefix is never copied into the verdict. */
+  readonly stagedAppend?: readonly MemoryEvent[];
   readonly resultDigest: string;
 }
 
@@ -201,8 +208,11 @@ export interface TransitionAuditRecord {
   readonly actualRisk: TransitionRisk;
   readonly baseFingerprint: string;
   readonly afterFingerprint?: string;
+  readonly appendFingerprint?: string;
   readonly policyId: string;
   readonly policyVersion: string;
+  readonly policyDigest: string;
   readonly verifierId: string;
+  readonly verifierConfigDigest: string;
   readonly findingCodes: readonly string[];
 }

@@ -55,6 +55,23 @@ Every derived object references its source evidence. Security review and deletio
 
 Every object and index entry belongs to an explicit tenant/user/project/session scope. Broader-scope promotion is a new authorized event, not an implicit side effect of retrieval frequency.
 
+
+### Verified write capability
+
+Model/plugin code may propose operations but must not hold the canonical kernel or the
+`TransitionVerifier` commit capability. A transition is staged on an isolated kernel, bound to an
+exact base fingerprint, checked under a trusted frozen policy, and committed only by the same runtime
+instance that issued the accepted result. The pure `verifyTransition` function is an evaluator, not a
+write authority.
+
+External semantic/security checks must be constructed or authorized by the trusted host. Actor names,
+authority labels, SHA-256 digests, and report metadata are not signatures. Until authenticated actors
+and attestation exist, arbitrary check objects supplied by the proposing model are untrusted input.
+
+Transition policies cap operation count, scope fan-out, evidence fan-in, checks, state assertions, and
+canonical proposal size. Hosts must additionally cap raw request bytes and parser depth before calling
+the library.
+
 ### Reversible learning
 
 Procedures, controller versions, adapters, and context policies must support suppression and rollback.
@@ -64,11 +81,11 @@ Procedures, controller versions, adapters, and context policies must support sup
 - secret and credential scanning;
 - sensitive-attribute classification;
 - encryption at rest and in transit;
-- access-control and audit logs;
+- access-control, authenticated actor identities, and audit logs;
 - tenant isolation tests;
 - retention and deletion policy;
 - export and provenance inspection;
-- prompt-injection/taint evaluation;
+- prompt-injection/taint and transition-verifier red-team evaluation;
 - backup and disaster-recovery process;
 - dependency and supply-chain review;
 - incident response contacts.
