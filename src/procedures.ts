@@ -78,17 +78,28 @@ function wilsonLowerBound(successes: number, trials: number, z = 1.96): number {
 
 function deduplicateEvidence(evidence: readonly ProcedureEvidence[]): readonly ProcedureEvidence[] {
   const ids = new Set<string>();
-  const sourceGroups = new Set<string>();
+  const sourceGroupsByKind = new Set<string>();
   const result: ProcedureEvidence[] = [];
 
   for (const item of [...evidence].sort((a, b) => a.recordedAt - b.recordedAt || a.id.localeCompare(b.id))) {
+    if (item.id.trim().length === 0) throw new Error('procedure evidence id cannot be empty');
+    if (item.sourceGroup.trim().length === 0) {
+      throw new Error(`procedure evidence ${item.id} requires a sourceGroup`);
+    }
+    if (item.contextFingerprint.trim().length === 0) {
+      throw new Error(`procedure evidence ${item.id} requires a contextFingerprint`);
+    }
+    if (!Number.isFinite(item.recordedAt)) {
+      throw new Error(`procedure evidence ${item.id} requires a finite recordedAt`);
+    }
     if (ids.has(item.id)) throw new Error(`duplicate procedure evidence id: ${item.id}`);
     ids.add(item.id);
 
-    // One application report per source group is counted. Further reports remain audit evidence,
-    // but they cannot inflate independence statistics.
-    if (item.kind === 'application' && sourceGroups.has(item.sourceGroup)) continue;
-    if (item.kind === 'application') sourceGroups.add(item.sourceGroup);
+    // One report per (kind, source group) is counted. Retries, mirrors, or repeated summaries from
+    // one trajectory remain audit evidence but cannot satisfy independence or counterexample gates.
+    const independenceKey = `${item.kind}\u0000${item.sourceGroup}`;
+    if (sourceGroupsByKind.has(independenceKey)) continue;
+    sourceGroupsByKind.add(independenceKey);
     result.push(item);
   }
 
@@ -162,7 +173,34 @@ export function assessProcedure(
   evidence: readonly ProcedureEvidence[],
   options: { readonly deprecated?: boolean } = {},
 ): ProcedureAssessment {
+  if (definition.id.trim().length === 0) throw new Error('procedure id cannot be empty');
+  if (definition.name.trim().length === 0) throw new Error('procedure name cannot be empty');
+  if (definition.goalSignature.trim().length === 0) {
+    throw new Error('procedure goalSignature cannot be empty');
+  }
   if (definition.steps.length === 0) throw new Error('a procedure requires at least one step');
+  if (definition.steps.some((step) => step.trim().length === 0)) {
+    throw new Error('procedure steps cannot contain empty values');
+  }
+  if (
+    definition.requiredFeatures.some((feature) => feature.trim().length === 0) ||
+    definition.forbiddenFeatures.some((feature) => feature.trim().length === 0)
+  ) {
+    throw new Error('procedure applicability features cannot be empty');
+  }
+  const required = new Set(definition.requiredFeatures);
+  const forbidden = new Set(definition.forbiddenFeatures);
+  for (const feature of required) {
+    if (forbidden.has(feature)) {
+      throw new Error(`procedure feature cannot be both required and forbidden: ${feature}`);
+    }
+  }
+  if (required.size !== definition.requiredFeatures.length) {
+    throw new Error('requiredFeatures must not contain duplicates');
+  }
+  if (forbidden.size !== definition.forbiddenFeatures.length) {
+    throw new Error('forbiddenFeatures must not contain duplicates');
+  }
   if (new Set(definition.derivedFromEpisodes).size !== definition.derivedFromEpisodes.length) {
     throw new Error('derivedFromEpisodes must not contain duplicates');
   }

@@ -153,15 +153,17 @@ export function compileContext(
       return false;
     }
 
+    const projectedKindCounts = new Map(kindCounts);
     for (const packet of closure) {
       if (selected.has(packet.id)) continue;
       const maximum = options.maxPerKind?.[packet.kind];
-      const current = kindCounts.get(packet.kind) ?? 0;
+      const current = projectedKindCounts.get(packet.kind) ?? 0;
       if (maximum !== undefined && current >= maximum && packet.mandatory !== true) {
         if (required) throw new Error(`mandatory closure exceeds maxPerKind for ${packet.kind}`);
         rejected.set(rootId, `maxPerKind reached for ${packet.kind}`);
         return false;
       }
+      projectedKindCounts.set(packet.kind, current + 1);
     }
 
     for (const packet of closure) {

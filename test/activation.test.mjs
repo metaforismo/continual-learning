@@ -94,3 +94,68 @@ test('fan-out inhibition prevents a generic hub from flooding the activation fro
   assert.ok(genericChildren.length < 5);
   assert.ok(result.some((entry) => entry.id === 'race-procedure'));
 });
+
+test('scope authorization is a hard boundary even for exact, seeded, or associated matches', () => {
+  const scopedNodes = [
+    ...nodes,
+    {
+      id: 'other-user-secret',
+      kind: 'episode',
+      scope: 'user/other',
+      text: 'Showstead flaky authentication test secret exact match',
+      goalTags: ['debug', 'auth'],
+      authority: 'human-explicit',
+      recordedAt: now,
+      successes: 100,
+      failures: 0,
+    },
+  ];
+  const scopedEdges = [
+    ...edges,
+    {
+      from: 'showstead-auth-episode',
+      to: 'other-user-secret',
+      weight: 1,
+      kind: 'causal',
+    },
+  ];
+
+  const result = activateMemories(scopedNodes, scopedEdges, {
+    text: 'Showstead flaky authentication test secret exact match',
+    scopeChain: ['project/showstead', 'user/francesco', 'global'],
+    goalTags: ['debug', 'auth'],
+    seedIds: ['other-user-secret'],
+    semanticScores: { 'other-user-secret': 1 },
+    now,
+    maxHops: 2,
+  });
+
+  assert.equal(result.some((entry) => entry.id === 'other-user-secret'), false);
+});
+
+test('authority and recency do not activate an unrelated memory without a cue', () => {
+  const result = activateMemories(
+    [
+      {
+        id: 'unrelated',
+        kind: 'episode',
+        scope: 'project/showstead',
+        text: 'completely unrelated cooking note',
+        goalTags: [],
+        authority: 'system-policy',
+        recordedAt: now,
+        successes: 100,
+        failures: 0,
+      },
+    ],
+    [],
+    {
+      text: 'debug authentication',
+      scopeChain: ['project/showstead'],
+      goalTags: ['debug'],
+      now,
+    },
+  );
+
+  assert.deepEqual(result, []);
+});

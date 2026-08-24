@@ -91,18 +91,39 @@ export function activateMemories(
   query: ActivationQuery,
 ): readonly ActivatedMemory[] {
   if (!Number.isFinite(query.now)) throw new TypeError('query.now must be finite');
+  if (query.scopeChain.length === 0) {
+    throw new Error('activation requires an explicit non-empty authorized scope chain');
+  }
+  if (new Set(query.scopeChain).size !== query.scopeChain.length) {
+    throw new Error('scopeChain cannot contain duplicates');
+  }
+  const maxHops = query.maxHops ?? 2;
+  const limit = query.limit ?? 128;
+  if (!Number.isInteger(maxHops) || maxHops < 0 || maxHops > 8) {
+    throw new RangeError('maxHops must be an integer in [0, 8]');
+  }
+  if (!Number.isInteger(limit) || limit <= 0) {
+    throw new RangeError('limit must be a positive integer');
+  }
 
-  const nodeById = new Map(nodes.map((node) => [node.id, node] as const));
-  if (nodeById.size !== nodes.length) throw new Error('activation node ids must be unique');
+  const allNodesById = new Map(nodes.map((node) => [node.id, node] as const));
+  if (allNodesById.size !== nodes.length) throw new Error('activation node ids must be unique');
+
+  const allowedScopes = new Set(query.scopeChain);
+  const allowedNodes = nodes.filter((node) => allowedScopes.has(node.scope));
+  const nodeById = new Map(allowedNodes.map((node) => [node.id, node] as const));
 
   const adjacency = new Map<string, ActivationEdge[]>();
   for (const edge of edges) {
-    if (!nodeById.has(edge.from) || !nodeById.has(edge.to)) {
+    if (!allNodesById.has(edge.from) || !allNodesById.has(edge.to)) {
       throw new Error(`association references an unknown node: ${edge.from} -> ${edge.to}`);
     }
     if (!Number.isFinite(edge.weight) || edge.weight < 0 || edge.weight > 1) {
       throw new RangeError('association weights must be in [0, 1]');
     }
+    // Scope authorization is a hard boundary, not a ranking feature. Cross-scope edges are only
+    // traversable when both endpoint scopes are present in the caller's explicit scope chain.
+    if (!nodeById.has(edge.from) || !nodeById.has(edge.to)) continue;
     const bucket = adjacency.get(edge.from) ?? [];
     bucket.push(edge);
     adjacency.set(edge.from, bucket);
@@ -115,7 +136,7 @@ export function activateMemories(
   const componentById = new Map<string, ScoreComponents>();
   const activatedBy = new Map<string, Set<string>>();
 
-  for (const node of nodes) {
+  for (const node of allowedNodes) {
     const scopeIndex = query.scopeChain.indexOf(node.scope);
     const scope =
       scopeIndex < 0 || query.scopeChain.length === 0
@@ -142,24 +163,24 @@ export function activateMemories(
       fanoutPenalty: Math.log1p(outDegree) * 0.12,
     };
 
+    const cueStrength =
+      components.lexical + components.semantic + components.goal + components.seed;
     const direct =
-      components.lexical +
-      components.semantic +
-      components.scope +
-      components.goal +
-      components.authority +
-      components.utility +
-      components.recency +
-      components.seed -
-      components.fanoutPenalty;
+      cueStrength <= 0
+        ? 0
+        : cueStrength +
+          components.scope +
+          components.authority +
+          components.utility +
+          components.recency -
+          components.fanoutPenalty;
 
     scoreById.set(node.id, Math.max(0, direct));
     componentById.set(node.id, components);
     activatedBy.set(node.id, new Set(seedIds.has(node.id) ? ['explicit-seed'] : []));
   }
 
-  let frontier = new Map(scoreById);
-  const maxHops = query.maxHops ?? 2;
+  let frontier = new Map([...scoreById].filter(([, score]) => score > 0));
   const propagationDecay = 0.42;
 
   for (let hop = 1; hop <= maxHops; hop += 1) {
@@ -190,7 +211,7 @@ export function activateMemories(
   const results = [...scoreById.entries()]
     .filter(([, score]) => score > 0)
     .sort((left, right) => right[1] - left[1] || left[0].localeCompare(right[0]))
-    .slice(0, query.limit ?? 128)
+    .slice(0, limit)
     .map(([id, score]) =>
       Object.freeze({
         id,

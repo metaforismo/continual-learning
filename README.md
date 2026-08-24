@@ -89,7 +89,7 @@ npm install
 npm test
 ```
 
-The test suite currently exercises 11 foundational invariants.
+The test suite currently exercises 19 foundational invariants.
 
 ## Documentation
 

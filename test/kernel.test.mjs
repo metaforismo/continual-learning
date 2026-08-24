@@ -175,3 +175,76 @@ test('conflicting claims remain ambiguous unless an explicit authority policy re
   assert.equal(policyResolved.status, 'resolved');
   assert.equal(policyResolved.claim?.id, human.id);
 });
+
+test('transaction time is monotonic so known-at replay cannot observe orphaned later events', () => {
+  const ledger = new EventLedger();
+  ledger.append({
+    id: 'event-time-1',
+    type: 'claim.asserted',
+    recordedAt: 100,
+    actor: 'test',
+    data: { claim: claim({ id: 'claim-time-1', value: 'vim' }), initialLifecycle: 'active' },
+  });
+
+  assert.throws(
+    () =>
+      ledger.append({
+        id: 'event-time-2',
+        type: 'claim.asserted',
+        recordedAt: 99,
+        actor: 'test',
+        data: { claim: claim({ id: 'claim-time-2', value: 'zed' }), initialLifecycle: 'active' },
+      }),
+    /recordedAt must be monotonic/,
+  );
+});
+
+test('the ledger snapshots stateful input properties once before validation', () => {
+  const ledger = new EventLedger();
+  let reads = 0;
+  const input = {
+    get id() {
+      reads += 1;
+      return reads === 1 ? 'stable-event-id' : 'changed-event-id';
+    },
+    type: 'claim.asserted',
+    recordedAt: 1,
+    actor: 'test',
+    data: { claim: claim({ id: 'stable-claim', value: 'vim' }), initialLifecycle: 'active' },
+  };
+
+  const event = ledger.append(input);
+  assert.equal(reads, 1);
+  assert.equal(event.id, 'stable-event-id');
+});
+
+test('the ledger rejects circular and sparse structures instead of persisting ambiguous JSON', () => {
+  const ledger = new EventLedger();
+  const circular = {};
+  circular.self = circular;
+  const sparse = [];
+  sparse.length = 1;
+
+  assert.throws(
+    () =>
+      ledger.append({
+        id: 'circular-event',
+        type: 'outcome.recorded',
+        recordedAt: 1,
+        actor: 'test',
+        data: circular,
+      }),
+    /circular reference/,
+  );
+  assert.throws(
+    () =>
+      ledger.append({
+        id: 'sparse-event',
+        type: 'outcome.recorded',
+        recordedAt: 1,
+        actor: 'test',
+        data: sparse,
+      }),
+    /sparse array/,
+  );
+});

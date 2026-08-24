@@ -65,3 +65,40 @@ test('procedure applicability preserves positive and negative boundary condition
     false,
   );
 });
+
+test('duplicate counterexample reports from one source group do not inflate trust', () => {
+  const applications = Array.from({ length: 20 }, (_, index) =>
+    evidence(index, {
+      contextFingerprint: `context-${index % 4}`,
+    }),
+  );
+  const duplicateCounterexamples = Array.from({ length: 3 }, (_, index) =>
+    evidence(100 + index, {
+      id: `counterexample-${index}`,
+      sourceGroup: 'one-counterexample-run',
+      contextFingerprint: 'counterexample-space',
+      kind: 'counterexample-search',
+      outcome: 'unknown',
+      verifier: 'human',
+    }),
+  );
+
+  const assessment = assessProcedure(definition, [...applications, ...duplicateCounterexamples]);
+  assert.equal(assessment.statistics.counterexampleSearches, 1);
+  assert.equal(assessment.stage, 'validated');
+});
+
+test('contradictory applicability boundaries are rejected', () => {
+  assert.throws(
+    () =>
+      assessProcedure(
+        {
+          ...definition,
+          requiredFeatures: ['authentication'],
+          forbiddenFeatures: ['authentication'],
+        },
+        [],
+      ),
+    /both required and forbidden/,
+  );
+});

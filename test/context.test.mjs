@@ -117,3 +117,29 @@ test('high-risk learned procedures cannot enter context without their evidence',
   assert.equal(compiled.selected.length, 0);
   assert.match(compiled.rejected[0]?.reason ?? '', /evidence/);
 });
+
+test('dependency closures cannot collectively exceed a per-kind cap', () => {
+  const packets = [
+    packet({
+      id: 'procedure-with-two-episodes',
+      kind: 'procedure',
+      activationScore: 100,
+      dependsOn: ['episode-a', 'episode-b'],
+    }),
+    packet({ id: 'episode-a', kind: 'episode', activationScore: 1 }),
+    packet({ id: 'episode-b', kind: 'episode', activationScore: 1 }),
+  ];
+
+  const compiled = compileContext(packets, {
+    tokenBudget: 500,
+    view: 'current',
+    maxPerKind: { episode: 1 },
+  });
+
+  assert.equal(compiled.selected.some((item) => item.id === 'procedure-with-two-episodes'), false);
+  assert.ok(compiled.selected.filter((item) => item.kind === 'episode').length <= 1);
+  assert.match(
+    compiled.rejected.find((item) => item.id === 'procedure-with-two-episodes')?.reason ?? '',
+    /maxPerKind/,
+  );
+});

@@ -1,6 +1,6 @@
 import type { MemoryEvent, MemoryEventInput } from './domain.js';
 
-function cloneAndFreezeJson<T>(value: T, path = '$'): T {
+function cloneAndFreezeJson<T>(value: T, path = '$', ancestors = new WeakSet<object>()): T {
   if (value === null || typeof value === 'string' || typeof value === 'boolean') {
     return value;
   }
@@ -13,23 +13,33 @@ function cloneAndFreezeJson<T>(value: T, path = '$'): T {
   }
 
   if (Array.isArray(value)) {
-    const cloned = value.map((item, index) => cloneAndFreezeJson(item, `${path}[${index}]`));
+    if (ancestors.has(value)) throw new TypeError(`${path} cannot contain a circular reference`);
+    ancestors.add(value);
+    const cloned: unknown[] = [];
+    for (let index = 0; index < value.length; index += 1) {
+      if (!(index in value)) throw new TypeError(`${path} cannot contain a sparse array`);
+      cloned.push(cloneAndFreezeJson(value[index], `${path}[${index}]`, ancestors));
+    }
+    ancestors.delete(value);
     return Object.freeze(cloned) as T;
   }
 
   if (typeof value === 'object') {
+    if (ancestors.has(value)) throw new TypeError(`${path} cannot contain a circular reference`);
     const prototype = Object.getPrototypeOf(value);
     if (prototype !== Object.prototype && prototype !== null) {
       throw new TypeError(`${path} must be a plain JSON object`);
     }
 
+    ancestors.add(value);
     const cloned: Record<string, unknown> = {};
     for (const [key, item] of Object.entries(value as Record<string, unknown>)) {
       if (item === undefined) {
         throw new TypeError(`${path}.${key} cannot be undefined`);
       }
-      cloned[key] = cloneAndFreezeJson(item, `${path}.${key}`);
+      cloned[key] = cloneAndFreezeJson(item, `${path}.${key}`, ancestors);
     }
+    ancestors.delete(value);
     return Object.freeze(cloned) as T;
   }
 
@@ -47,23 +57,29 @@ export class EventLedger {
   readonly #ids = new Set<string>();
 
   append(input: MemoryEventInput): MemoryEvent {
-    if (input.id.trim().length === 0) {
-      throw new TypeError('event id cannot be empty');
-    }
-    if (this.#ids.has(input.id)) {
-      throw new Error(`duplicate event id: ${input.id}`);
-    }
-    if (!Number.isFinite(input.recordedAt)) {
-      throw new TypeError('recordedAt must be a finite Unix epoch millisecond value');
-    }
-    if (input.actor.trim().length === 0) {
-      throw new TypeError('actor cannot be empty');
-    }
-
+    // Snapshot once before validation. This prevents stateful getters from presenting one value
+    // to validation and another value to storage.
     const event = cloneAndFreezeJson({
       ...input,
       seq: this.#events.length + 1,
     }) as MemoryEvent;
+
+    if (event.id.trim().length === 0) {
+      throw new TypeError('event id cannot be empty');
+    }
+    if (this.#ids.has(event.id)) {
+      throw new Error(`duplicate event id: ${event.id}`);
+    }
+    if (!Number.isFinite(event.recordedAt)) {
+      throw new TypeError('recordedAt must be a finite Unix epoch millisecond value');
+    }
+    const latest = this.#events.at(-1);
+    if (latest !== undefined && event.recordedAt < latest.recordedAt) {
+      throw new RangeError('recordedAt must be monotonic within one canonical ledger');
+    }
+    if (event.actor.trim().length === 0) {
+      throw new TypeError('actor cannot be empty');
+    }
 
     this.#events.push(event);
     this.#ids.add(event.id);
