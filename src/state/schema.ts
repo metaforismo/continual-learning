@@ -1,12 +1,24 @@
-import { claimKeyToString } from '../domain.js';
+import {
+  claimKeyToString,
+  isAuthority,
+  isEvidenceRole,
+} from '../domain.js';
 import type {
   StateAdjudicationSchema,
   StateInvalidationRule,
+  StateResolutionStrategy,
   StateSlotDefinition,
 } from './types.js';
 
 export const DEFAULT_MAX_INVALIDATION_HOPS = 8;
 export const DEFAULT_MAX_INVALIDATED_SLOTS = 128;
+
+const STRATEGIES: ReadonlySet<string> = new Set<StateResolutionStrategy>([
+  'require-agreement',
+  'latest-valid',
+  'role-authority',
+  'role-authority-then-latest',
+]);
 
 function assertNonEmpty(value: string, label: string): void {
   if (value.trim().length === 0) throw new Error(`${label} cannot be empty`);
@@ -18,12 +30,18 @@ function validateSlot(slot: StateSlotDefinition): void {
   assertNonEmpty(slot.key.scope, `state slot ${slot.id} scope`);
   assertNonEmpty(slot.key.subject, `state slot ${slot.id} subject`);
   assertNonEmpty(slot.key.predicate, `state slot ${slot.id} predicate`);
+  if (!STRATEGIES.has(slot.strategy)) {
+    throw new Error(`state slot ${slot.id} has an unknown resolution strategy`);
+  }
 
   if (slot.evidencePolicy.length === 0) {
     throw new Error(`state slot ${slot.id} requires an explicit evidence policy`);
   }
   const roles = new Set<string>();
   for (const policy of slot.evidencePolicy) {
+    if (!isEvidenceRole(policy.role)) {
+      throw new Error(`state slot ${slot.id} contains an unknown evidence role`);
+    }
     if (roles.has(policy.role)) {
       throw new Error(`state slot ${slot.id} repeats evidence role ${policy.role}`);
     }
@@ -36,6 +54,11 @@ function validateSlot(slot: StateSlotDefinition): void {
     if (new Set(policy.authorityPrecedence).size !== policy.authorityPrecedence.length) {
       throw new Error(
         `state slot ${slot.id} role ${policy.role} repeats an authority`,
+      );
+    }
+    if (policy.authorityPrecedence.some((authority) => !isAuthority(authority))) {
+      throw new Error(
+        `state slot ${slot.id} role ${policy.role} contains an unknown authority`,
       );
     }
   }
@@ -66,6 +89,13 @@ function validateRule(
   }
   if (rule.sourceSlotId === rule.targetSlotId) {
     throw new Error(`state invalidation ${rule.id} cannot invalidate its own slot`);
+  }
+  if (
+    rule.trigger !== undefined &&
+    rule.trigger !== 'value-change' &&
+    rule.trigger !== 'new-claim'
+  ) {
+    throw new Error(`state invalidation ${rule.id} has an unknown trigger`);
   }
 }
 
