@@ -53,6 +53,8 @@ canonical experience ledger        immutable evidence
                                       v
                               activated memory
                                       |
+                              state adjudicator
+                                      |
                               context compiler
                                       |
                               bounded LLM context
@@ -71,13 +73,18 @@ The foundational TypeScript kernel currently includes:
 - an append-only, schema-versioned event ledger with structural and semantic replay;
 - strict single-read JSON snapshots resistant to mutation and prototype-pollution input;
 - a content-addressed evidence metadata plane with provenance DAGs, source independence, sensitivity, taint, and availability state;
-- evidence-backed claims, associations, and verified outcomes with hard scope boundaries;
+- role-aware evidence use: `supports`, `verifies`, `context`, `contradicts`, and `constrains`;
+- evidence-backed claims, associations, and verifier-role outcomes with hard scope boundaries;
 - write-time claim admission checks and quarantine;
-- bitemporal claim resolution using world time and transaction time;
-- explicit supersession, revocation, authority, ambiguity, and provenance;
+- bitemporal claim projection using world time and transaction time;
+- deterministic, domain-specific state policies rather than one global authority ranking;
+- explicit `current`, `historical`, `disputed`, `unknown-current`, and `unknown` state;
+- premise resistance for requests that presuppose stale state;
+- bounded implicit invalidation over a validated dependency DAG;
+- transition-aware invalidation that distinguishes a value change from a same-value reaffirmation;
 - sparse multi-signal memory activation;
 - associative expansion with fan-out inhibition;
-- a dependency-, evidence-, diversity-, and token-budget-aware context compiler;
+- a dependency-, evidence-role-, diversity-, and token-budget-aware context compiler;
 - procedure promotion gates based on independent evidence, verified outcomes, counterexample search, applicability boundaries, failure rate, and Wilson confidence bounds.
 
 The kernel intentionally has no embedding provider, database, LLM dependency, or DeepSeek Harness coupling yet. Those are replaceable adapters, not correctness primitives.
@@ -91,12 +98,13 @@ npm install
 npm test
 ```
 
-The test suite currently exercises 39 foundational invariants.
+The test suite currently exercises 59 foundational and state-adjudication scenarios.
 
 ## Documentation
 
 - [Architecture](docs/ARCHITECTURE.md)
 - [Evidence model](docs/EVIDENCE_MODEL.md)
+- [State adjudication](docs/STATE_ADJUDICATION.md)
 - [Learning contract](docs/LEARNING_CONTRACT.md)
 - [Failure modes and mitigations](docs/FAILURE_MODES.md)
 - [Evaluation and evidence ladder](docs/EVALUATION.md)
@@ -121,4 +129,4 @@ Those claims must be earned independently through the evidence ladder.
 
 ## Status
 
-Foundational kernel. APIs may change while the invariants and evaluation boundary are established.
+Foundational kernel and deterministic state adjudicator. APIs may change while durability, transition verification, concurrency, and evaluation boundaries are established.

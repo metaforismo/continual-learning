@@ -146,6 +146,55 @@ export class ClaimProjection {
     return this.#claims.get(claimId)?.lifecycle;
   }
 
+  candidates(
+    key: ClaimKey,
+    options: Pick<ResolveClaimOptions, 'validAt' | 'minimumAuthority'>,
+    authorizeClaim: (claim: ClaimRecord) => boolean = () => true,
+  ): readonly ClaimRecord[] {
+    if (!Number.isFinite(options.validAt)) throw new TypeError('validAt must be finite');
+    const minimumRank = AUTHORITY_RANK[options.minimumAuthority ?? 'model-inference'];
+    const keyString = claimKeyToString(key);
+    return Object.freeze(
+      [...this.#claims.values()]
+        .filter((projected) => {
+          if (claimKeyToString(projected.claim.key) !== keyString) return false;
+          if (projected.lifecycle === 'quarantined' || projected.lifecycle === 'revoked') return false;
+          if (AUTHORITY_RANK[projected.claim.authority] < minimumRank) return false;
+          if (!authorizeClaim(projected.claim)) return false;
+          return effectiveIntervalContains(projected, options.validAt);
+        })
+        .sort(
+          (left, right) =>
+            right.claim.valid.from - left.claim.valid.from ||
+            right.assertedSeq - left.assertedSeq ||
+            left.claim.id.localeCompare(right.claim.id),
+        )
+        .map((projected) => projected.claim),
+    );
+  }
+
+  history(
+    key: ClaimKey,
+    authorizeClaim: (claim: ClaimRecord) => boolean = () => true,
+  ): readonly ClaimRecord[] {
+    const keyString = claimKeyToString(key);
+    return Object.freeze(
+      [...this.#claims.values()]
+        .filter((projected) => {
+          if (claimKeyToString(projected.claim.key) !== keyString) return false;
+          if (projected.lifecycle === 'quarantined' || projected.lifecycle === 'revoked') return false;
+          return authorizeClaim(projected.claim);
+        })
+        .sort(
+          (left, right) =>
+            left.claim.valid.from - right.claim.valid.from ||
+            left.assertedSeq - right.assertedSeq ||
+            left.claim.id.localeCompare(right.claim.id),
+        )
+        .map((projected) => projected.claim),
+    );
+  }
+
   resolve(
     key: ClaimKey,
     options: ResolveClaimOptions,

@@ -2,6 +2,7 @@ import { validateClaimForAdmission, validateSupersession } from './admission.js'
 import { ClaimProjection, type ClaimResolution, type ResolveClaimOptions } from './claims.js';
 import {
   AUTHORITY_RANK,
+  evidenceRoles,
   type AssociationRecord,
   type ClaimKey,
   type ClaimRecord,
@@ -328,11 +329,23 @@ export class MemoryKernel {
           : data.verifier === 'model'
             ? AUTHORITY_RANK['model-inference']
             : -1;
-    const strongestEvidence = Math.max(
-      ...projected.map((entry) => AUTHORITY_RANK[entry.record.authority]),
-    );
-    if (strongestEvidence < authorityFloor) {
-      throw new Error(`outcome verifier ${data.verifier} lacks evidence with sufficient authority`);
+    const verifyingEvidence = projected.filter((_, index) => {
+      const reference = data.evidence[index];
+      return (
+        reference !== undefined &&
+        (reference.roles === undefined || evidenceRoles(reference).includes('verifies'))
+      );
+    });
+    const strongestVerifyingEvidence =
+      verifyingEvidence.length === 0
+        ? -1
+        : Math.max(
+            ...verifyingEvidence.map((entry) => AUTHORITY_RANK[entry.record.authority]),
+          );
+    if (strongestVerifyingEvidence < authorityFloor) {
+      throw new Error(
+        `outcome verifier ${data.verifier} lacks evidence with sufficient authority: explicit verifying evidence is required`,
+      );
     }
 
     return this.#append({

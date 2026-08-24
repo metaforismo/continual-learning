@@ -1,3 +1,5 @@
+import { isEvidenceRole, type EvidenceRole } from './domain.js';
+
 export type MemoryPacketKind =
   | 'state'
   | 'episode'
@@ -13,6 +15,11 @@ export type PacketAuthorization =
   | 'quarantined'
   | 'revoked';
 
+export interface EvidencePacketLink {
+  readonly packetId: string;
+  readonly roles: readonly EvidenceRole[];
+}
+
 export interface MemoryPacket {
   readonly id: string;
   readonly kind: MemoryPacketKind;
@@ -23,7 +30,10 @@ export interface MemoryPacket {
   readonly authorization: PacketAuthorization;
   readonly mandatory?: boolean;
   readonly dependsOn?: readonly string[];
+  /** Legacy untyped evidence dependencies. Prefer evidenceLinks for new correctness boundaries. */
   readonly evidencePacketIds?: readonly string[];
+  readonly evidenceLinks?: readonly EvidencePacketLink[];
+  readonly requiredEvidenceRoles?: readonly EvidenceRole[];
   readonly risk?: 'low' | 'medium' | 'high';
 }
 
@@ -70,11 +80,74 @@ function authorizationReason(
   return undefined;
 }
 
+function evidenceDependencyIds(packet: MemoryPacket): readonly string[] {
+  return Object.freeze([
+    ...new Set([
+      ...(packet.evidencePacketIds ?? []),
+      ...(packet.evidenceLinks ?? []).map((link) => link.packetId),
+    ]),
+  ]);
+}
+
+function evidenceRoleFailure(packet: MemoryPacket): string | undefined {
+  const required = packet.requiredEvidenceRoles ?? [];
+  if (required.length === 0) return undefined;
+  const present = new Set((packet.evidenceLinks ?? []).flatMap((link) => link.roles));
+  const missing = required.filter((role) => !present.has(role));
+  return missing.length === 0
+    ? undefined
+    : `memory lacks required evidence roles: ${missing.join(', ')}`;
+}
+
+function validateEvidenceMetadata(packet: MemoryPacket): void {
+  if (packet.evidencePacketIds !== undefined) {
+    if (packet.evidencePacketIds.some((id) => id.trim().length === 0)) {
+      throw new Error(`packet ${packet.id} has an empty legacy evidence packet id`);
+    }
+    if (new Set(packet.evidencePacketIds).size !== packet.evidencePacketIds.length) {
+      throw new Error(`packet ${packet.id} repeats a legacy evidence packet id`);
+    }
+  }
+
+  if (packet.requiredEvidenceRoles !== undefined) {
+    if (packet.requiredEvidenceRoles.length === 0) {
+      throw new Error(`packet ${packet.id} requiredEvidenceRoles cannot be empty`);
+    }
+    if (new Set(packet.requiredEvidenceRoles).size !== packet.requiredEvidenceRoles.length) {
+      throw new Error(`packet ${packet.id} requiredEvidenceRoles cannot contain duplicates`);
+    }
+    if (packet.requiredEvidenceRoles.some((role) => !isEvidenceRole(role))) {
+      throw new Error(`packet ${packet.id} requiredEvidenceRoles contains an unknown role`);
+    }
+  }
+
+  const packetIds = new Set<string>();
+  for (const link of packet.evidenceLinks ?? []) {
+    if (link.packetId.trim().length === 0) {
+      throw new Error(`packet ${packet.id} has an empty evidence packet id`);
+    }
+    if (packetIds.has(link.packetId)) {
+      throw new Error(`packet ${packet.id} repeats evidence packet link ${link.packetId}`);
+    }
+    packetIds.add(link.packetId);
+    if (link.roles.length === 0) {
+      throw new Error(`packet ${packet.id} evidence link ${link.packetId} requires at least one role`);
+    }
+    if (new Set(link.roles).size !== link.roles.length) {
+      throw new Error(`packet ${packet.id} evidence link ${link.packetId} repeats a role`);
+    }
+    if (link.roles.some((role) => !isEvidenceRole(role))) {
+      throw new Error(`packet ${packet.id} evidence link ${link.packetId} contains an unknown role`);
+    }
+  }
+}
+
 /**
  * Materialize a bounded working set from a much larger activated set.
  *
- * Selection is budgeted, dependency-aware, risk-aware, and diversity-seeking. It deliberately
- * refuses quarantined, revoked, stale-current, or unresolved raw state even when activation is high.
+ * Selection is budgeted, dependency-aware, role-aware, risk-aware, and diversity-seeking. It
+ * deliberately refuses quarantined, revoked, stale-current, or unresolved raw state even when
+ * activation is high.
  */
 export function compileContext(
   packets: readonly MemoryPacket[],
@@ -93,6 +166,7 @@ export function compileContext(
     if (!Number.isFinite(packet.activationScore) || packet.activationScore < 0) {
       throw new RangeError(`packet ${packet.id} must have a non-negative activation score`);
     }
+    validateEvidenceMetadata(packet);
     packetById.set(packet.id, packet);
   }
 
@@ -125,7 +199,14 @@ export function compileContext(
         rejected.set(rootId, `dependency ${id} is unauthorized: ${authFailure}`);
         return false;
       }
-      if (packet.risk === 'high' && (packet.evidencePacketIds?.length ?? 0) === 0) {
+      const roleFailure = evidenceRoleFailure(packet);
+      if (roleFailure !== undefined) {
+        if (required) throw new Error(`required packet ${id} is unsupported: ${roleFailure}`);
+        rejected.set(rootId, roleFailure);
+        return false;
+      }
+      const evidenceIds = evidenceDependencyIds(packet);
+      if (packet.risk === 'high' && evidenceIds.length === 0) {
         if (required) throw new Error(`high-risk packet ${id} has no evidence dependency`);
         rejected.set(rootId, `high-risk packet ${id} has no evidence dependency`);
         return false;
@@ -135,7 +216,7 @@ export function compileContext(
       for (const dependency of packet.dependsOn ?? []) {
         if (!visit(dependency)) return false;
       }
-      for (const evidenceId of packet.evidencePacketIds ?? []) {
+      for (const evidenceId of evidenceIds) {
         if (!visit(evidenceId)) return false;
       }
       visiting.delete(id);
@@ -200,7 +281,12 @@ export function compileContext(
         rejected.set(packet.id, failure);
         continue;
       }
-      if (packet.risk === 'high' && (packet.evidencePacketIds?.length ?? 0) === 0) {
+      const roleFailure = evidenceRoleFailure(packet);
+      if (roleFailure !== undefined) {
+        rejected.set(packet.id, roleFailure);
+        continue;
+      }
+      if (packet.risk === 'high' && evidenceDependencyIds(packet).length === 0) {
         rejected.set(packet.id, 'high-risk memory lacks recoverable evidence');
         continue;
       }

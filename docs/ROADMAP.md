@@ -55,14 +55,16 @@ Exit gate: bounded p95 read/context cost and no material degradation on controll
 
 ## Phase 3 — State adjudication and trustworthy writes
 
-- typed state ontology and dynamic slots;
-- implicit invalidation candidate search;
-- `active / historical / disputed / unknown-current` state roles;
-- transition verifier for coverage, preservation, and faithfulness;
-- authority and taint policy;
-- deterministic policy execution after semantic evidence extraction;
-- human review UI for high-impact ambiguity;
-- serializable per-belief write partitions and logged judge verdicts.
+- [x] typed static state slots and explicit domain policies;
+- [x] bounded implicit invalidation search and transitive propagation;
+- [x] `current / historical / disputed / unknown-current / unknown` state roles;
+- [ ] transition verifier for coverage, preservation, and faithfulness;
+- [x] role- and domain-specific authority policy;
+- [x] deterministic policy execution after candidate extraction;
+- [x] premise resistance and role-aware context packets;
+- [ ] human review UI for high-impact ambiguity;
+- [ ] serializable per-belief write partitions and logged judge verdicts;
+- [ ] persisted, signed state-policy versions and migration fixtures.
 
 Exit gate: strong current-state, historical-state, premise-resistance, and contamination results.
 
