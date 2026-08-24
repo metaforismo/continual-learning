@@ -15,6 +15,14 @@ function canonicalJson(value: JsonValue): string {
     .join(',')}}`;
 }
 
+function eligibleClaimIds(decision: StateDecision): ReadonlySet<string> {
+  return new Set(
+    decision.explanation.candidates
+      .filter((evaluation) => evaluation.eligible)
+      .map((evaluation) => evaluation.claim.id),
+  );
+}
+
 function contentForDecision(decision: StateDecision): string {
   const identity = `${decision.slot.domain}/${decision.slot.id}`;
   if (decision.value !== undefined) {
@@ -43,9 +51,13 @@ function contentForDecision(decision: StateDecision): string {
   }
 
   if (decision.status === 'disputed') {
+    const eligibleIds = eligibleClaimIds(decision);
+    const disputedIds = decision.candidates
+      .filter((claim) => eligibleIds.has(claim.id))
+      .map((claim) => claim.id);
     return [
       `State for ${identity} is disputed; no candidate is authorized as the single value.`,
-      `Candidate claim ids: ${decision.candidates.map((claim) => claim.id).join(', ') || 'none'}.`,
+      `Eligible candidate claim ids: ${disputedIds.join(', ') || 'none'}.`,
       'Preserve the conflict or request verification instead of selecting by prompt wording.',
     ].join('\n');
   }
@@ -57,11 +69,7 @@ function contentForDecision(decision: StateDecision): string {
 }
 
 function selectedClaims(decision: StateDecision) {
-  const eligibleIds = new Set(
-    decision.explanation.candidates
-      .filter((evaluation) => evaluation.eligible)
-      .map((evaluation) => evaluation.claim.id),
-  );
+  const eligibleIds = eligibleClaimIds(decision);
 
   if (decision.value !== undefined) {
     const selectedGroup = decision.explanation.valueGroups.find(
