@@ -84,6 +84,22 @@ The current schema prevents:
 
 A future explicit declassification/sanitization protocol may relax some inheritance rules, but it must be a separately authorized, audited transition. Ordinary summarization is not declassification.
 
+## Evidence roles
+
+An evidence reference also records how the source is being used by the derived object:
+
+- `supports` — evidence in favor of the claim;
+- `verifies` — evidence that directly checks it;
+- `context` — background that does not independently establish it;
+- `contradicts` — evidence against it;
+- `constrains` — evidence limiting downstream use.
+
+Roles belong to the reference, not the underlying artifact. One test result may verify an execution outcome while serving only as context for a broader architectural claim.
+
+Authority and role are independent dimensions. A high-authority contextual source cannot elevate claim authority, and an explicitly role-aware verified claim requires qualifying `verifies` evidence. Legacy references without roles are interpreted as `supports`; legacy strong evidence is accepted by the original admission boundary for compatibility, while new state policies can require explicit verification.
+
+State adjudication treats currently available contradicting evidence as a reason that the claim cannot directly govern current state.
+
 ## Taint is sticky
 
 Taints currently include:
@@ -139,9 +155,10 @@ sourceId
 sourceGroups
 source authority
 content digest
+use-site roles
 ```
 
-All fields must exactly match the captured record, and the evidence must currently be available. This blocks forged hashes, forged authority, fabricated independence, and dangling ids.
+Identity, source groups, authority, and digest must exactly match the captured record, and the evidence must currently be available. Roles must be non-empty and unique when explicitly supplied. This blocks forged hashes, forged authority, fabricated independence, dangling ids, and ambiguous empty role annotations.
 
 Claims, associations, and verified outcomes are scoped derived objects. They cannot cite narrower-scope evidence while silently promoting it into a broader scope. Global evidence may be reused in a narrower scope without copying its bytes.
 
