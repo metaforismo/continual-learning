@@ -57,9 +57,29 @@ function contentForDecision(decision: StateDecision): string {
 }
 
 function selectedClaims(decision: StateDecision) {
-  const selectedKey = decision.explanation.selectedValueKey;
-  if (selectedKey === undefined) return decision.candidates;
-  return decision.candidates.filter((claim) => canonicalJson(claim.value) === selectedKey);
+  const eligibleIds = new Set(
+    decision.explanation.candidates
+      .filter((evaluation) => evaluation.eligible)
+      .map((evaluation) => evaluation.claim.id),
+  );
+
+  if (decision.value !== undefined) {
+    const selectedGroup = decision.explanation.valueGroups.find(
+      (group) => group.valueKey === decision.explanation.selectedValueKey,
+    );
+    const selectedIds = new Set(selectedGroup?.eligibleClaimIds ?? []);
+    return decision.candidates.filter(
+      (claim) => eligibleIds.has(claim.id) && selectedIds.has(claim.id),
+    );
+  }
+
+  if (decision.status === 'disputed') {
+    return decision.candidates.filter((claim) => eligibleIds.has(claim.id));
+  }
+
+  // Unknown-current packets should carry the newer invalidation basis, not rematerialize the stale
+  // candidate whose use they are explicitly blocking.
+  return [];
 }
 
 function mergeRole(
