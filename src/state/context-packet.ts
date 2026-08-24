@@ -20,7 +20,7 @@ function contentForDecision(decision: StateDecision): string {
   if (decision.value !== undefined) {
     return [
       `Authorized ${decision.status} state for ${identity}: ${canonicalJson(decision.value)}.`,
-      `Source claim: ${decision.claim?.id ?? 'multiple agreeing claims'}.`,
+      `Representative claim: ${decision.claim?.id ?? 'multiple agreeing claims'}.`,
       decision.premise.status === 'rejected'
         ? `Reject the request premise: ${decision.premise.reason}.`
         : '',
@@ -92,11 +92,21 @@ function mergeRole(
   byPacketId.set(packetId, merged);
 }
 
+function mappedPacketId(
+  mapping: Readonly<Record<string, string>>,
+  sourceId: string,
+): string | undefined {
+  if (!Object.prototype.hasOwnProperty.call(mapping, sourceId)) return undefined;
+  const packetId = mapping[sourceId];
+  return typeof packetId === 'string' && packetId.trim().length > 0 ? packetId : undefined;
+}
+
 /**
  * Convert an adjudicated state into one context packet with provenance closure.
  *
  * Raw conflicting claims are never emitted as independently authoritative packet text. Resolved
  * state becomes a `state` packet; disputed or unknown state becomes a model-authorized constraint.
+ * Provenance mapping is strict by default; callers must explicitly opt out for non-model UI views.
  */
 export function stateDecisionToContextPacket(
   decision: StateDecision,
@@ -108,7 +118,7 @@ export function stateDecisionToContextPacket(
 
   for (const claim of selectedClaims(decision)) {
     for (const reference of claim.evidence) {
-      const packetId = packetMap[reference.sourceId];
+      const packetId = mappedPacketId(packetMap, reference.sourceId);
       if (packetId === undefined) {
         missing.add(reference.sourceId);
         continue;
@@ -119,7 +129,7 @@ export function stateDecisionToContextPacket(
 
   for (const invalidation of decision.invalidations) {
     for (const sourceId of invalidation.sourceEvidenceSourceIds) {
-      const packetId = packetMap[sourceId];
+      const packetId = mappedPacketId(packetMap, sourceId);
       if (packetId === undefined) {
         missing.add(sourceId);
         continue;
@@ -128,7 +138,8 @@ export function stateDecisionToContextPacket(
     }
   }
 
-  if (options.enforceEvidenceDependencies === true && missing.size > 0) {
+  const enforceEvidenceDependencies = options.enforceEvidenceDependencies ?? true;
+  if (enforceEvidenceDependencies && missing.size > 0) {
     throw new Error(
       `state packet is missing evidence packet mappings for: ${[...missing].sort().join(', ')}`,
     );
