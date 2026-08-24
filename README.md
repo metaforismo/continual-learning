@@ -98,7 +98,7 @@ npm install
 npm test
 ```
 
-The test suite currently exercises 57 foundational and state-adjudication scenarios.
+The test suite currently exercises 59 foundational and state-adjudication scenarios.
 
 ## Documentation
 
