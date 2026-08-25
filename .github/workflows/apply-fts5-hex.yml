@@ -39,32 +39,26 @@ jobs:
           rm -f .github/workflows/apply-fts5-final.yml
           rm -f .github/workflows/apply-fts5-hex.yml
       - name: Install dependencies
-        shell: bash
-        run: |
-          set -o pipefail
-          npm ci --ignore-scripts --no-audit --no-fund 2>&1 | tee /tmp/npm-ci.log || {
-            echo '--- npm ci failure ---'
-            tail -n 120 /tmp/npm-ci.log
-            exit 1
-          }
+        run: npm ci --ignore-scripts --no-audit --no-fund
       - name: Build
-        shell: bash
-        run: |
-          set -o pipefail
-          npm run build 2>&1 | tee /tmp/build.log || {
-            echo '--- build failure ---'
-            tail -n 160 /tmp/build.log
-            exit 1
-          }
+        run: npm run build
       - name: Test
+        id: tests
+        continue-on-error: true
         shell: bash
         run: |
           set -o pipefail
-          node --test test/*.test.mjs 2>&1 | tee /tmp/test.log || {
-            echo '--- test failure ---'
-            tail -n 220 /tmp/test.log
-            exit 1
-          }
+          node --test test/*.test.mjs 2>&1 | tee /tmp/test.log
+      - name: Upload test log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: fts5-test-log
+          path: /tmp/test.log
+          retention-days: 1
+      - name: Enforce test result
+        if: steps.tests.outcome == 'failure'
+        run: exit 1
       - name: Check staged diff
         run: git diff --check --cached
       - name: Commit final branch
