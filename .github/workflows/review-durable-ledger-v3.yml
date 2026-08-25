@@ -1,0 +1,344 @@
+name: Linearize durable receipt verification
+
+on:
+  push:
+    branches:
+      - feat/durable-canonical-ledger-v1
+
+permissions:
+  contents: write
+  pull-requests: write
+
+concurrency:
+  group: durable-ledger-v3
+  cancel-in-progress: false
+
+jobs:
+  harden:
+    runs-on: ubuntu-24.04
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: feat/durable-canonical-ledger-v1
+          fetch-depth: 0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22.23.2
+      - name: Bind receipts to event-chain boundaries
+        shell: bash
+        run: |
+          python <<'PY'
+          from pathlib import Path
+
+          p = Path('src/storage/types.ts')
+          t = p.read_text()
+          old = """  readonly eventCountAfter: number;
+            readonly previousReceiptDigest: string;
+            readonly auditRecordDigest: string;
+            readonly receiptDigest: string;
+          """
+          new = """  readonly eventCountAfter: number;
+            /** Event-chain head at `eventCountAfter`; binds the receipt to its canonical prefix. */
+            readonly eventChainDigestAfter: string;
+            readonly previousReceiptDigest: string;
+            readonly receiptRecordDigest: string;
+            readonly receiptDigest: string;
+          """
+          if old not in t:
+              raise SystemExit('missing durable receipt digest fields')
+          p.write_text(t.replace(old, new, 1))
+
+          p = Path('src/storage/sqlite-ledger.ts')
+          t = p.read_text()
+          t = t.replace(
+              """  readonly event_count_after: number;
+            readonly record_json: string;
+          """,
+              """  readonly event_count_after: number;
+            readonly event_chain_digest_after: string;
+            readonly record_json: string;
+          """,
+              1,
+          )
+          t = t.replace(
+              """        event_count_after INTEGER NOT NULL CHECK (event_count_after > 0),
+                record_json TEXT NOT NULL,
+          """,
+              """        event_count_after INTEGER NOT NULL CHECK (event_count_after > 0),
+                event_chain_digest_after TEXT NOT NULL,
+                record_json TEXT NOT NULL,
+          """,
+              1,
+          )
+          t = t.replace(
+              """    } catch (error) {
+              try {
+                this.#db.close();
+              } finally {
+                this.#closed = true;
+              }
+              throw error;
+            }
+          """,
+              """    } catch (error) {
+              try {
+                this.#db.close();
+              } catch {
+                // Preserve the initialization/integrity failure.
+              }
+              this.#closed = true;
+              throw error;
+            }
+          """,
+              1,
+          )
+
+          old = """    const eventCountAfter = integer(
+              row.event_count_after,
+              `transition receipt ${expectedSeq} event_count_after`,
+              1,
+            );
+            const recordDigest = digestCanonical({ audit, resultSnapshotDigest, eventCountAfter });
+            if (row.record_digest !== recordDigest) {
+          """
+          new = """    const eventCountAfter = integer(
+              row.event_count_after,
+              `transition receipt ${expectedSeq} event_count_after`,
+              1,
+            );
+            const eventChainDigestAfter = contentAddress(
+              row.event_chain_digest_after,
+              `transition receipt ${expectedSeq} event-chain digest`,
+            );
+            const receiptRecordDigest = digestCanonical({
+              audit,
+              resultSnapshotDigest,
+              eventCountAfter,
+              eventChainDigestAfter,
+            });
+            if (row.record_digest !== receiptRecordDigest) {
+          """
+          if old not in t:
+              raise SystemExit('missing receipt digest block')
+          t = t.replace(old, new, 1)
+          t = t.replace(
+              'const receiptDigest = nextReceiptChainDigest(previousDigest, recordDigest);',
+              'const receiptDigest = nextReceiptChainDigest(previousDigest, receiptRecordDigest);',
+              1,
+          )
+          t = t.replace(
+              """      resultSnapshotDigest,
+              eventCountAfter,
+              previousReceiptDigest: previousDigest,
+              auditRecordDigest: recordDigest,
+              receiptDigest,
+          """,
+              """      resultSnapshotDigest,
+              eventCountAfter,
+              eventChainDigestAfter,
+              previousReceiptDigest: previousDigest,
+              receiptRecordDigest,
+              receiptDigest,
+          """,
+              1,
+          )
+
+          start = t.index('  #receiptsForMeta(')
+          end = t.index('\n  revision():', start)
+          replacement = """  #receiptsForMeta(meta: MetaRow): readonly DurableTransitionReceipt[] {
+            const rows = this.#db
+              .prepare(`
+                SELECT seq, id, result_digest, result_snapshot_digest, event_count_after,
+                       event_chain_digest_after, record_json, record_digest,
+                       previous_receipt_digest, receipt_digest
+                  FROM cl_transition_receipts
+                 ORDER BY seq ASC
+              `)
+              .all() as unknown as readonly ReceiptRow[];
+            if (rows.length !== meta.receipt_count) {
+              throw new Error('transition receipt row count does not match metadata');
+            }
+            const receipts: DurableTransitionReceipt[] = [];
+            const eventChainAt = this.#db.prepare(
+              'SELECT chain_digest FROM cl_ledger_events WHERE seq = ?',
+            );
+            let previousDigest = RECEIPT_CHAIN_GENESIS;
+            let previousEventCount = 0;
+            for (let index = 0; index < rows.length; index += 1) {
+              const row = rows[index];
+              if (row === undefined) throw new Error('transition receipt row iteration failed');
+              const receipt = this.#receiptFromRow(row, index + 1, previousDigest);
+              if (
+                receipt.eventCountAfter <= previousEventCount ||
+                receipt.eventCountAfter > meta.event_count
+              ) {
+                throw new Error(`transition receipt ${index + 1} has an invalid event boundary`);
+              }
+              const eventBoundary = eventChainAt.get(receipt.eventCountAfter) as
+                | { readonly chain_digest?: unknown }
+                | undefined;
+              if (
+                eventBoundary === undefined ||
+                eventBoundary.chain_digest !== receipt.eventChainDigestAfter
+              ) {
+                throw new Error(`transition receipt ${index + 1} does not match its event-chain boundary`);
+              }
+              receipts.push(receipt);
+              previousDigest = receipt.receiptDigest;
+              previousEventCount = receipt.eventCountAfter;
+            }
+            if (previousDigest !== meta.last_receipt_digest) {
+              throw new Error('transition receipt-chain head does not match metadata');
+            }
+            if ((meta.event_count === 0) !== (meta.receipt_count === 0)) {
+              throw new Error('canonical events and transition receipts cannot exist independently');
+            }
+            const latest = receipts.at(-1);
+            if (
+              latest?.eventCountAfter !== (meta.event_count === 0 ? undefined : meta.event_count) ||
+              latest?.eventChainDigestAfter !==
+                (meta.event_count === 0 ? undefined : meta.event_chain_digest)
+            ) {
+              throw new Error('latest transition receipt does not cover the canonical event head');
+            }
+            return Object.freeze(receipts);
+          }
+          """
+          t = t[:start] + replacement + t[end:]
+          t = t.replace(
+              'this.#receiptsForMeta(meta, this.#eventsForMeta(meta));',
+              'this.#eventsForMeta(meta);\n      this.#receiptsForMeta(meta);',
+              1,
+          )
+          t = t.replace('this.#receiptsForMeta(meta, events);', 'this.#receiptsForMeta(meta);')
+
+          old = """    const resultSnapshot = canonicalJson(result);
+            const resultSnapshotDigest = digestCanonical(result);
+            const verifiedResult = JSON.parse(resultSnapshot) as TransitionVerificationResult;
+          """
+          new = """    const resultSnapshot = canonicalJson(result);
+            const verifiedResult = JSON.parse(resultSnapshot) as TransitionVerificationResult;
+            const resultSnapshotDigest = digestCanonical(verifiedResult);
+          """
+          if old not in t:
+              raise SystemExit('missing stable result snapshot block')
+          t = t.replace(old, new, 1)
+          t = t.replace(
+              'const existingReceipts = this.#receiptsForMeta(meta, currentEvents);',
+              'const existingReceipts = this.#receiptsForMeta(meta);',
+              1,
+          )
+
+          old = """      const eventCountAfter = nextEvents.length;
+              const auditRecordDigest = digestCanonical({
+                audit,
+                resultSnapshotDigest,
+                eventCountAfter,
+              });
+              const receiptDigest = nextReceiptChainDigest(meta.last_receipt_digest, auditRecordDigest);
+          """
+          new = """      const eventCountAfter = nextEvents.length;
+              const eventChainDigestAfter = chainDigest;
+              const receiptRecordDigest = digestCanonical({
+                audit,
+                resultSnapshotDigest,
+                eventCountAfter,
+                eventChainDigestAfter,
+              });
+              const receiptDigest = nextReceiptChainDigest(
+                meta.last_receipt_digest,
+                receiptRecordDigest,
+              );
+          """
+          if old not in t:
+              raise SystemExit('missing new receipt digest block')
+          t = t.replace(old, new, 1)
+          t = t.replace(
+              """            seq, id, result_digest, result_snapshot_digest, event_count_after,
+                    record_json, record_digest, previous_receipt_digest, receipt_digest
+                  ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+          """,
+              """            seq, id, result_digest, result_snapshot_digest, event_count_after,
+                    event_chain_digest_after, record_json, record_digest,
+                    previous_receipt_digest, receipt_digest
+                  ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+          """,
+              1,
+          )
+          t = t.replace(
+              """          eventCountAfter,
+                  auditJson,
+                  auditRecordDigest,
+                  meta.last_receipt_digest,
+          """,
+              """          eventCountAfter,
+                  eventChainDigestAfter,
+                  auditJson,
+                  receiptRecordDigest,
+                  meta.last_receipt_digest,
+          """,
+              1,
+          )
+          t = t.replace(
+              """        eventCountAfter,
+                previousReceiptDigest: meta.last_receipt_digest,
+                auditRecordDigest,
+                receiptDigest,
+          """,
+              """        eventCountAfter,
+                eventChainDigestAfter,
+                previousReceiptDigest: meta.last_receipt_digest,
+                receiptRecordDigest,
+                receiptDigest,
+          """,
+              1,
+          )
+          p.write_text(t)
+
+          p = Path('docs/DURABLE_LEDGER.md')
+          t = p.read_text()
+          t = t.replace(
+              """transition audit record
+          result digest
+          canonical audit-record digest
+          previous receipt digest
+          receipt-chain digest
+          """,
+              """transition audit record
+          result digest and exact result-snapshot digest
+          canonical event count and event-chain head after the transition
+          canonical receipt-record digest
+          previous receipt digest
+          receipt-chain digest
+          """,
+              1,
+          )
+          t = t.replace(
+              """The database fails closed when any check fails. V1 performs full verification and replay; checkpointed verification is future work.
+          """,
+              """The database fails closed when any check fails. Event replay and receipt validation are linear in the stored rows; each receipt is bound to the event-chain head at its own canonical boundary. V1 still performs full verification on open and strict reads; checkpointed verification is future work.
+          """,
+              1,
+          )
+          p.write_text(t)
+          PY
+      - name: Verify and publish the linear receipt boundary
+        run: |
+          npm ci --ignore-scripts --no-audit --no-fund
+          npm run check
+          git diff --check
+          rm .github/workflows/review-durable-ledger-v3.yml
+          git config user.name metaforismo
+          git config user.email 39646696+metaforismo@users.noreply.github.com
+          git add -A
+          git commit -m "fix: bind receipts to linear event-chain boundaries"
+          git push origin HEAD:feat/durable-canonical-ledger-v1
+      - name: Note the scalability fix on the draft PR
+        shell: bash
+        run: |
+          number="$(gh pr list --repo metaforismo/continual-learning --head feat/durable-canonical-ledger-v1 --state open --json number --jq '.[0].number // empty')"
+          if [ -n "$number" ]; then
+            gh pr comment "$number" --repo metaforismo/continual-learning --body 'Third adversarial pass removes quadratic receipt-prefix verification. Each receipt is now digest-bound to its exact event count and event-chain head; full strict verification remains linear in events plus receipts. It also fixes a single-read result-snapshot regression.'
+          fi
