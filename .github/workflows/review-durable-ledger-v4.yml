@@ -1,0 +1,383 @@
+name: Verify durable receipt relations
+
+on:
+  push:
+    branches:
+      - feat/durable-canonical-ledger-v1
+
+permissions:
+  contents: write
+  pull-requests: write
+
+concurrency:
+  group: durable-ledger-v4
+  cancel-in-progress: false
+
+jobs:
+  harden:
+    runs-on: ubuntu-24.04
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: feat/durable-canonical-ledger-v1
+          fetch-depth: 0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22.23.2
+      - name: Add relational receipt verification
+        shell: bash
+        run: |
+          python <<'PY'
+          from pathlib import Path
+
+          p = Path('src/storage/sqlite-ledger.ts')
+          t = p.read_text()
+
+          start = t.index("    const existing = this.#db")
+          end = t.index("\n  }\n\n  #withReadTransaction", start)
+          replacement = """    const emptyFingerprint = fingerprintMemoryEvents(Object.freeze([]));
+            this.#db
+              .prepare(`
+                INSERT OR IGNORE INTO cl_ledger_meta (
+                  singleton, schema_version, revision, event_count, last_seq, last_recorded_at,
+                  canonical_fingerprint, event_chain_digest, receipt_count, last_receipt_digest
+                ) VALUES (?, ?, 0, 0, 0, NULL, ?, ?, 0, ?)
+              `)
+              .run(
+                META_ROW_ID,
+                DURABLE_LEDGER_SCHEMA_VERSION,
+                emptyFingerprint,
+                EVENT_CHAIN_GENESIS,
+                RECEIPT_CHAIN_GENESIS,
+              );
+          """
+          t = t[:start] + replacement + t[end:]
+
+          old = """    if (row.event_count !== row.last_seq) {
+              throw new Error('durable ledger metadata event_count and last_seq diverge');
+            }
+            if (row.event_count === 0 && row.last_recorded_at !== null) {
+          """
+          new = """    if (row.event_count !== row.last_seq) {
+              throw new Error('durable ledger metadata event_count and last_seq diverge');
+            }
+            if (row.revision !== row.receipt_count) {
+              throw new Error('durable ledger revision and receipt_count diverge');
+            }
+            if (row.event_count < row.receipt_count) {
+              throw new Error('durable ledger cannot have more receipts than events');
+            }
+            if (row.event_count === 0 && row.last_recorded_at !== null) {
+          """
+          if old not in t:
+              raise SystemExit('missing metadata invariant block')
+          t = t.replace(old, new, 1)
+
+          old = """      const event = JSON.parse(nonEmptyString(row.event_json, 'event row JSON')) as MemoryEvent;
+              if (canonicalJson(event) !== row.event_json) {
+                throw new Error(`event ${expectedSeq} is not stored in canonical JSON form`);
+              }
+              if (
+                event.seq !== row.seq ||
+                event.id !== row.id ||
+                event.schemaVersion !== row.schema_version ||
+                event.type !== row.type ||
+                event.recordedAt !== row.recorded_at ||
+                event.actor !== row.actor
+              ) {
+          """
+          new = """      const rowSchemaVersion = integer(
+                row.schema_version,
+                `event ${expectedSeq} schema_version`,
+                1,
+              );
+              const rowRecordedAt = integer(
+                row.recorded_at,
+                `event ${expectedSeq} recorded_at`,
+              );
+              const event = JSON.parse(nonEmptyString(row.event_json, 'event row JSON')) as MemoryEvent;
+              if (canonicalJson(event) !== row.event_json) {
+                throw new Error(`event ${expectedSeq} is not stored in canonical JSON form`);
+              }
+              if (!Number.isSafeInteger(event.recordedAt) || event.recordedAt < 0) {
+                throw new Error(`event ${expectedSeq} recordedAt must be a non-negative safe integer`);
+              }
+              if (
+                event.seq !== row.seq ||
+                event.id !== row.id ||
+                event.schemaVersion !== rowSchemaVersion ||
+                event.type !== row.type ||
+                event.recordedAt !== rowRecordedAt ||
+                event.actor !== row.actor
+              ) {
+          """
+          if old not in t:
+              raise SystemExit('missing event validation block')
+          t = t.replace(old, new, 1)
+
+          old = """    if (audit.schemaVersion !== TRANSITION_AUDIT_SCHEMA_VERSION) {
+              throw new Error(`transition receipt ${expectedSeq} has an unsupported audit schema`);
+            }
+            const resultSnapshotDigest = contentAddress(
+          """
+          new = """    if (audit.schemaVersion !== TRANSITION_AUDIT_SCHEMA_VERSION) {
+              throw new Error(`transition receipt ${expectedSeq} has an unsupported audit schema`);
+            }
+            if (!Number.isSafeInteger(audit.recordedAt) || audit.recordedAt < 0) {
+              throw new Error(`transition receipt ${expectedSeq} recordedAt is invalid`);
+            }
+            nonEmptyString(audit.actor, `transition receipt ${expectedSeq} actor`);
+            nonEmptyString(audit.proposalId, `transition receipt ${expectedSeq} proposalId`);
+            nonEmptyString(audit.policyId, `transition receipt ${expectedSeq} policyId`);
+            nonEmptyString(audit.policyVersion, `transition receipt ${expectedSeq} policyVersion`);
+            nonEmptyString(audit.verifierId, `transition receipt ${expectedSeq} verifierId`);
+            contentAddress(audit.proposalDigest, `transition receipt ${expectedSeq} proposalDigest`);
+            contentAddress(audit.resultDigest, `transition receipt ${expectedSeq} resultDigest`);
+            contentAddress(audit.baseFingerprint, `transition receipt ${expectedSeq} baseFingerprint`);
+            contentAddress(audit.afterFingerprint, `transition receipt ${expectedSeq} afterFingerprint`);
+            contentAddress(audit.appendFingerprint, `transition receipt ${expectedSeq} appendFingerprint`);
+            contentAddress(audit.policyDigest, `transition receipt ${expectedSeq} policyDigest`);
+            contentAddress(
+              audit.verifierConfigDigest,
+              `transition receipt ${expectedSeq} verifierConfigDigest`,
+            );
+            if (audit.verdict !== 'accept') {
+              throw new Error(`transition receipt ${expectedSeq} is not an accepted transition`);
+            }
+            if (!['low', 'medium', 'high', 'destructive'].includes(audit.actualRisk)) {
+              throw new Error(`transition receipt ${expectedSeq} has an invalid risk`);
+            }
+            if (
+              !Array.isArray(audit.findingCodes) ||
+              audit.findingCodes.some(
+                (code) => typeof code !== 'string' || code.trim().length === 0,
+              ) ||
+              audit.findingCodes.join('\\u0000') !==
+                [...new Set(audit.findingCodes)].sort().join('\\u0000')
+            ) {
+              throw new Error(`transition receipt ${expectedSeq} finding codes are not canonical`);
+            }
+            const resultSnapshotDigest = contentAddress(
+          """
+          if old not in t:
+              raise SystemExit('missing audit validation point')
+          t = t.replace(old, new, 1)
+
+          start = t.index('  #receiptsForMeta(')
+          end = t.index('\n  revision():', start)
+          replacement = """  #receiptsForMeta(meta: MetaRow): readonly DurableTransitionReceipt[] {
+            const rows = this.#db
+              .prepare(`
+                SELECT seq, id, result_digest, result_snapshot_digest, event_count_after,
+                       event_chain_digest_after, record_json, record_digest,
+                       previous_receipt_digest, receipt_digest
+                  FROM cl_transition_receipts
+                 ORDER BY seq ASC
+              `)
+              .all() as unknown as readonly ReceiptRow[];
+            if (rows.length !== meta.receipt_count) {
+              throw new Error('transition receipt row count does not match metadata');
+            }
+            const receipts: DurableTransitionReceipt[] = [];
+            const eventBoundaryAt = this.#db.prepare(
+              'SELECT recorded_at, chain_digest FROM cl_ledger_events WHERE seq = ?',
+            );
+            const eventJsonRange = this.#db.prepare(`
+              SELECT event_json
+                FROM cl_ledger_events
+               WHERE seq > ? AND seq <= ?
+               ORDER BY seq ASC
+            `);
+            let previousDigest = RECEIPT_CHAIN_GENESIS;
+            let previousEventCount = 0;
+            let previousAfterFingerprint = fingerprintMemoryEvents(Object.freeze([]));
+            let previousReceiptTime: number | undefined;
+            for (let index = 0; index < rows.length; index += 1) {
+              const row = rows[index];
+              if (row === undefined) throw new Error('transition receipt row iteration failed');
+              const receipt = this.#receiptFromRow(row, index + 1, previousDigest);
+              if (
+                receipt.eventCountAfter <= previousEventCount ||
+                receipt.eventCountAfter > meta.event_count
+              ) {
+                throw new Error(`transition receipt ${index + 1} has an invalid event boundary`);
+              }
+              const eventBoundary = eventBoundaryAt.get(receipt.eventCountAfter) as
+                | { readonly recorded_at?: unknown; readonly chain_digest?: unknown }
+                | undefined;
+              if (
+                eventBoundary === undefined ||
+                eventBoundary.chain_digest !== receipt.eventChainDigestAfter
+              ) {
+                throw new Error(`transition receipt ${index + 1} does not match its event-chain boundary`);
+              }
+              const boundaryTime = integer(
+                eventBoundary.recorded_at,
+                `transition receipt ${index + 1} event boundary time`,
+              );
+              if (
+                receipt.audit.recordedAt < boundaryTime ||
+                (previousReceiptTime !== undefined &&
+                  receipt.audit.recordedAt < previousReceiptTime)
+              ) {
+                throw new Error(`transition receipt ${index + 1} violates transaction-time monotonicity`);
+              }
+              if (receipt.audit.baseFingerprint !== previousAfterFingerprint) {
+                throw new Error(`transition receipt ${index + 1} base fingerprint breaks receipt history`);
+              }
+              const segmentRows = eventJsonRange.all(
+                previousEventCount,
+                receipt.eventCountAfter,
+              ) as unknown as readonly { readonly event_json?: unknown }[];
+              const segment = segmentRows.map((segmentRow, segmentIndex) => {
+                const serialized = nonEmptyString(
+                  segmentRow.event_json,
+                  `transition receipt ${index + 1} event segment ${segmentIndex + 1}`,
+                );
+                return JSON.parse(serialized) as MemoryEvent;
+              });
+              if (digestCanonical(segment) !== receipt.audit.appendFingerprint) {
+                throw new Error(`transition receipt ${index + 1} append fingerprint mismatch`);
+              }
+              receipts.push(receipt);
+              previousDigest = receipt.receiptDigest;
+              previousEventCount = receipt.eventCountAfter;
+              previousAfterFingerprint = contentAddress(
+                receipt.audit.afterFingerprint,
+                `transition receipt ${index + 1} afterFingerprint`,
+              );
+              previousReceiptTime = receipt.audit.recordedAt;
+            }
+            if (previousDigest !== meta.last_receipt_digest) {
+              throw new Error('transition receipt-chain head does not match metadata');
+            }
+            if ((meta.event_count === 0) !== (meta.receipt_count === 0)) {
+              throw new Error('canonical events and transition receipts cannot exist independently');
+            }
+            const latest = receipts.at(-1);
+            if (
+              latest?.eventCountAfter !== (meta.event_count === 0 ? undefined : meta.event_count) ||
+              latest?.eventChainDigestAfter !==
+                (meta.event_count === 0 ? undefined : meta.event_chain_digest) ||
+              latest?.audit.afterFingerprint !==
+                (meta.event_count === 0 ? undefined : meta.canonical_fingerprint)
+            ) {
+              throw new Error('latest transition receipt does not cover the canonical event head');
+            }
+            return Object.freeze(receipts);
+          }
+          """
+          t = t[:start] + replacement + t[end:]
+          p.write_text(t)
+
+          p = Path('test/sqlite-canonical-ledger.test.mjs')
+          t = p.read_text()
+          old = """  digestCanonical,
+            fingerprintMemoryEvents,
+          } from '../dist/index.js';
+          """
+          new = """  digestCanonical,
+            fingerprintMemoryEvents,
+            nextReceiptChainDigest,
+            RECEIPT_CHAIN_GENESIS,
+          } from '../dist/index.js';
+          """
+          if old not in t:
+              raise SystemExit('missing test import block')
+          t = t.replace(old, new, 1)
+          marker = "test('event-row or receipt-row tampering is detected on reopen', () => {\n"
+          addition = """test('coherently rehashed receipt metadata cannot break base, append, or time relations', () => {
+            for (const mutation of ['base', 'append', 'time']) {
+              withDatabase((path) => {
+                const store = new SqliteCanonicalLedger(path);
+                const result = acceptedCapture(store.events(), `relational-${mutation}`, 70);
+                store.commitVerifiedTransition(
+                  result,
+                  trustedCommitter,
+                  { id: `receipt/relational-${mutation}`, recordedAt: 71, actor: 'durable-host' },
+                );
+                store.close();
+
+                const raw = new DatabaseSync(path);
+                raw.exec('DROP TRIGGER cl_transition_receipts_no_update');
+                const row = raw.prepare(`
+                  SELECT record_json, result_snapshot_digest, event_count_after,
+                         event_chain_digest_after
+                    FROM cl_transition_receipts
+                   WHERE seq = 1
+                `).get();
+                const audit = JSON.parse(row.record_json);
+                if (mutation === 'base') audit.baseFingerprint = sha('wrong-base');
+                if (mutation === 'append') audit.appendFingerprint = sha('wrong-append');
+                if (mutation === 'time') audit.recordedAt = 69;
+                const recordJson = JSON.stringify(audit);
+                const recordDigest = digestCanonical({
+                  audit,
+                  resultSnapshotDigest: row.result_snapshot_digest,
+                  eventCountAfter: row.event_count_after,
+                  eventChainDigestAfter: row.event_chain_digest_after,
+                });
+                const receiptDigest = nextReceiptChainDigest(RECEIPT_CHAIN_GENESIS, recordDigest);
+                raw.prepare(`
+                  UPDATE cl_transition_receipts
+                     SET record_json = ?, record_digest = ?, receipt_digest = ?
+                   WHERE seq = 1
+                `).run(recordJson, recordDigest, receiptDigest);
+                raw.prepare(
+                  'UPDATE cl_ledger_meta SET last_receipt_digest = ? WHERE singleton = 1',
+                ).run(receiptDigest);
+                raw.close();
+
+                assert.throws(
+                  () => new SqliteCanonicalLedger(path),
+                  /base fingerprint|append fingerprint|transaction-time|integrity failed/,
+                  mutation,
+                );
+              });
+            }
+          });
+
+          test('strict canonical reads fail when the receipt side is missing', () => {
+            withDatabase((path) => {
+              const store = new SqliteCanonicalLedger(path);
+              const result = acceptedCapture(store.events(), 'strict-read-receipt', 80);
+              store.commitVerifiedTransition(
+                result,
+                trustedCommitter,
+                { id: 'receipt/strict-read-receipt', recordedAt: 81, actor: 'durable-host' },
+              );
+              const raw = new DatabaseSync(path);
+              raw.exec('DROP TRIGGER cl_transition_receipts_no_delete');
+              raw.prepare('DELETE FROM cl_transition_receipts WHERE seq = 1').run();
+              raw.close();
+              assert.throws(() => store.events(), /receipt row count/);
+              assert.throws(() => store.loadKernel(), /receipt row count/);
+              store.close();
+            });
+          });
+
+          """
+          if marker not in t:
+              raise SystemExit('missing relational test insertion point')
+          p.write_text(t.replace(marker, addition + marker, 1))
+          PY
+      - name: Verify and publish relational invariants
+        run: |
+          npm ci --ignore-scripts --no-audit --no-fund
+          npm run check
+          git diff --check
+          rm .github/workflows/review-durable-ledger-v4.yml
+          git config user.name metaforismo
+          git config user.email 39646696+metaforismo@users.noreply.github.com
+          git add -A
+          git commit -m "fix: verify durable receipt history relations"
+          git push origin HEAD:feat/durable-canonical-ledger-v1
+      - name: Note the relational review on the draft PR
+        shell: bash
+        run: |
+          number="$(gh pr list --repo metaforismo/continual-learning --head feat/durable-canonical-ledger-v1 --state open --json number --jq '.[0].number // empty')"
+          if [ -n "$number" ]; then
+            gh pr comment "$number" --repo metaforismo/continual-learning --body 'Fourth adversarial pass adds race-free metadata initialization, revision/receipt invariants, safe-integer replay checks, receipt base→after continuity, disjoint append verification, receipt/event time ordering, and strict read failure when either atomic side is missing.'
+          fi
