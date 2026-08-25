@@ -1,0 +1,49 @@
+name: Finalize PR6 types and metadata
+
+on:
+  push:
+    branches:
+      - feat/fts5-projection-v1-final
+
+permissions:
+  contents: write
+
+concurrency:
+  group: finalize-pr6-runtime
+  cancel-in-progress: false
+
+jobs:
+  finalize:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: feat/fts5-projection-v1-final
+          fetch-depth: 0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22.23.2
+      - name: Use the official Node runtime declarations
+        run: |
+          rm -f src/sqlite-ambient.d.ts src/runtime-ambient.d.ts
+          npm install --save-dev --save-exact @types/node@22 --ignore-scripts --no-audit --no-fund
+          npm ci --ignore-scripts --no-audit --no-fund
+          npm run check
+          git diff --check
+      - name: Publish the clean verified branch
+        run: |
+          rm -f \
+            .github/workflows/finalize-pr6.yml \
+            .github/workflows/finalize-pr6-v2.yml \
+            .github/workflows/apply-fts5-lifecycle.yml \
+            .github/workflows/apply-fts5-reviewed.yml \
+            .github/workflows/apply-fts5-snapshot.yml \
+            .github/workflows/source-export-pr6.yml
+          git config user.name metaforismo
+          git config user.email 39646696+metaforismo@users.noreply.github.com
+          git add -A
+          if git diff --cached --quiet; then
+            exit 0
+          fi
+          git commit -m "fix: use official Node SQLite declarations"
+          git push origin HEAD:feat/fts5-projection-v1-final
