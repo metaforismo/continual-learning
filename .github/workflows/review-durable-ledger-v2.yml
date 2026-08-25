@@ -1,0 +1,521 @@
+name: Harden durable idempotency and strict reads
+
+on:
+  push:
+    branches:
+      - feat/durable-canonical-ledger-v1
+
+permissions:
+  contents: write
+  pull-requests: write
+
+concurrency:
+  group: durable-ledger-v2
+  cancel-in-progress: false
+
+jobs:
+  harden:
+    runs-on: ubuntu-24.04
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: feat/durable-canonical-ledger-v1
+          fetch-depth: 0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22.23.2
+      - name: Apply the adversarial idempotency fixes
+        shell: bash
+        run: |
+          python <<'PY'
+          from pathlib import Path
+
+          p = Path('src/storage/types.ts')
+          t = p.read_text()
+          old = """export interface DurableTransitionReceipt {
+            readonly audit: TransitionAuditRecord;
+            readonly previousReceiptDigest: string;
+            readonly auditRecordDigest: string;
+            readonly receiptDigest: string;
+          }
+          """
+          new = """export interface DurableTransitionReceipt {
+            readonly audit: TransitionAuditRecord;
+            /** Digest of the exact accepted result payload used for idempotency. */
+            readonly resultSnapshotDigest: string;
+            /** Canonical event count immediately after this transition committed. */
+            readonly eventCountAfter: number;
+            readonly previousReceiptDigest: string;
+            readonly auditRecordDigest: string;
+            readonly receiptDigest: string;
+          }
+          """
+          if old not in t:
+              raise SystemExit('missing durable receipt type')
+          p.write_text(t.replace(old, new, 1))
+
+          p = Path('src/storage/sqlite-ledger.ts')
+          t = p.read_text()
+          t = t.replace(
+              "if (typeof value !== 'number' || !Number.isInteger(value) || value < minimum)",
+              "if (typeof value !== 'number' || !Number.isSafeInteger(value) || value < minimum)",
+              1,
+          )
+
+          old = """interface ReceiptRow {
+            readonly seq: number;
+            readonly id: string;
+            readonly result_digest: string;
+            readonly record_json: string;
+            readonly record_digest: string;
+            readonly previous_receipt_digest: string;
+            readonly receipt_digest: string;
+          }
+          """
+          new = """interface ReceiptRow {
+            readonly seq: number;
+            readonly id: string;
+            readonly result_digest: string;
+            readonly result_snapshot_digest: string;
+            readonly event_count_after: number;
+            readonly record_json: string;
+            readonly record_digest: string;
+            readonly previous_receipt_digest: string;
+            readonly receipt_digest: string;
+          }
+          """
+          if old not in t:
+              raise SystemExit('missing receipt row type')
+          t = t.replace(old, new, 1)
+
+          old = """    this.#db = new DatabaseSync(location);
+            this.#faultInjector = options.faultInjector;
+            this.#db.exec('PRAGMA foreign_keys = ON');
+            this.#db.exec(`PRAGMA busy_timeout = ${busyTimeoutMs}`);
+            if (location !== ':memory:') {
+              this.#db.exec('PRAGMA journal_mode = WAL');
+              this.#db.exec('PRAGMA synchronous = FULL');
+            }
+            this.#initializeSchema();
+            const report = this.verifyIntegrity();
+            if (!report.ok) {
+              this.#db.close();
+              this.#closed = true;
+              throw new Error(`durable ledger integrity failed: ${report.errors.join('; ')}`);
+            }
+          """
+          new = """    this.#db = new DatabaseSync(location);
+            this.#faultInjector = options.faultInjector;
+            try {
+              this.#db.exec('PRAGMA foreign_keys = ON');
+              this.#db.exec(`PRAGMA busy_timeout = ${busyTimeoutMs}`);
+              if (location !== ':memory:') {
+                this.#db.exec('PRAGMA journal_mode = WAL');
+                this.#db.exec('PRAGMA synchronous = FULL');
+              }
+              this.#initializeSchema();
+              const report = this.verifyIntegrity();
+              if (!report.ok) {
+                throw new Error(`durable ledger integrity failed: ${report.errors.join('; ')}`);
+              }
+            } catch (error) {
+              try {
+                this.#db.close();
+              } finally {
+                this.#closed = true;
+              }
+              throw error;
+            }
+          """
+          if old not in t:
+              raise SystemExit('missing constructor initialization block')
+          t = t.replace(old, new, 1)
+
+          old = """      CREATE TABLE IF NOT EXISTS cl_transition_receipts (
+                seq INTEGER PRIMARY KEY,
+                id TEXT NOT NULL UNIQUE,
+                result_digest TEXT NOT NULL UNIQUE,
+                record_json TEXT NOT NULL,
+                record_digest TEXT NOT NULL,
+                previous_receipt_digest TEXT NOT NULL,
+                receipt_digest TEXT NOT NULL UNIQUE
+              ) STRICT;
+          """
+          new = """      CREATE TABLE IF NOT EXISTS cl_transition_receipts (
+                seq INTEGER PRIMARY KEY,
+                id TEXT NOT NULL UNIQUE,
+                result_digest TEXT NOT NULL UNIQUE,
+                result_snapshot_digest TEXT NOT NULL,
+                event_count_after INTEGER NOT NULL CHECK (event_count_after > 0),
+                record_json TEXT NOT NULL,
+                record_digest TEXT NOT NULL,
+                previous_receipt_digest TEXT NOT NULL,
+                receipt_digest TEXT NOT NULL UNIQUE
+              ) STRICT;
+          """
+          if old not in t:
+              raise SystemExit('missing receipt schema')
+          t = t.replace(old, new, 1)
+
+          start = t.index('  #receiptFromRow(')
+          end = t.index('\n  #receiptsForMeta(', start)
+          t = t[:start] + """  #receiptFromRow(row: ReceiptRow, expectedSeq: number, previousDigest: string): DurableTransitionReceipt {
+            if (integer(row.seq, 'receipt row seq', 1) !== expectedSeq) {
+              throw new Error(`transition receipt sequence is not contiguous at ${expectedSeq}`);
+            }
+            const audit = JSON.parse(nonEmptyString(row.record_json, 'receipt record JSON')) as TransitionAuditRecord;
+            if (canonicalJson(audit) !== row.record_json) {
+              throw new Error(`transition receipt ${expectedSeq} is not canonical JSON`);
+            }
+            if (audit.seq !== row.seq || audit.id !== row.id || audit.resultDigest !== row.result_digest) {
+              throw new Error(`transition receipt ${expectedSeq} columns do not match its audit payload`);
+            }
+            if (audit.schemaVersion !== TRANSITION_AUDIT_SCHEMA_VERSION) {
+              throw new Error(`transition receipt ${expectedSeq} has an unsupported audit schema`);
+            }
+            const resultSnapshotDigest = contentAddress(
+              row.result_snapshot_digest,
+              `transition receipt ${expectedSeq} result snapshot digest`,
+            );
+            const eventCountAfter = integer(
+              row.event_count_after,
+              `transition receipt ${expectedSeq} event_count_after`,
+              1,
+            );
+            const recordDigest = digestCanonical({ audit, resultSnapshotDigest, eventCountAfter });
+            if (row.record_digest !== recordDigest) {
+              throw new Error(`transition receipt ${expectedSeq} record digest mismatch`);
+            }
+            if (row.previous_receipt_digest !== previousDigest) {
+              throw new Error(`transition receipt ${expectedSeq} previous digest mismatch`);
+            }
+            const receiptDigest = nextReceiptChainDigest(previousDigest, recordDigest);
+            if (row.receipt_digest !== receiptDigest) {
+              throw new Error(`transition receipt ${expectedSeq} chain digest mismatch`);
+            }
+            return Object.freeze({
+              audit: Object.freeze(audit),
+              resultSnapshotDigest,
+              eventCountAfter,
+              previousReceiptDigest: previousDigest,
+              auditRecordDigest: recordDigest,
+              receiptDigest,
+            });
+          }
+          """ + t[end:]
+
+          start = t.index('  #receiptsForMeta(')
+          end = t.index('\n  revision():', start)
+          t = t[:start] + """  #receiptsForMeta(
+            meta: MetaRow,
+            events?: readonly MemoryEvent[],
+          ): readonly DurableTransitionReceipt[] {
+            const rows = this.#db
+              .prepare(`
+                SELECT seq, id, result_digest, result_snapshot_digest, event_count_after,
+                       record_json, record_digest, previous_receipt_digest, receipt_digest
+                  FROM cl_transition_receipts
+                 ORDER BY seq ASC
+              `)
+              .all() as unknown as readonly ReceiptRow[];
+            if (rows.length !== meta.receipt_count) {
+              throw new Error('transition receipt row count does not match metadata');
+            }
+            const receipts: DurableTransitionReceipt[] = [];
+            let previousDigest = RECEIPT_CHAIN_GENESIS;
+            let previousEventCount = 0;
+            for (let index = 0; index < rows.length; index += 1) {
+              const row = rows[index];
+              if (row === undefined) throw new Error('transition receipt row iteration failed');
+              const receipt = this.#receiptFromRow(row, index + 1, previousDigest);
+              if (
+                receipt.eventCountAfter <= previousEventCount ||
+                receipt.eventCountAfter > meta.event_count
+              ) {
+                throw new Error(`transition receipt ${index + 1} has an invalid event boundary`);
+              }
+              if (
+                events !== undefined &&
+                fingerprintMemoryEvents(events.slice(0, receipt.eventCountAfter)) !==
+                  receipt.audit.afterFingerprint
+              ) {
+                throw new Error(`transition receipt ${index + 1} after fingerprint mismatch`);
+              }
+              receipts.push(receipt);
+              previousDigest = receipt.receiptDigest;
+              previousEventCount = receipt.eventCountAfter;
+            }
+            if (previousDigest !== meta.last_receipt_digest) {
+              throw new Error('transition receipt-chain head does not match metadata');
+            }
+            if ((meta.event_count === 0) !== (meta.receipt_count === 0)) {
+              throw new Error('canonical events and transition receipts cannot exist independently');
+            }
+            if (
+              receipts.at(-1)?.eventCountAfter !==
+              (meta.event_count === 0 ? undefined : meta.event_count)
+            ) {
+              throw new Error('latest transition receipt does not cover the canonical event head');
+            }
+            return Object.freeze(receipts);
+          }
+          """ + t[end:]
+
+          old = """  events(): readonly MemoryEvent[] {
+            return this.#withReadTransaction(() => this.#eventsForMeta(this.#meta()));
+          }
+
+          receipts(): readonly DurableTransitionReceipt[] {
+            return this.#withReadTransaction(() => this.#receiptsForMeta(this.#meta()));
+          }
+          """
+          new = """  events(): readonly MemoryEvent[] {
+            return this.#withReadTransaction(() => {
+              const meta = this.#meta();
+              const events = this.#eventsForMeta(meta);
+              this.#receiptsForMeta(meta, events);
+              return events;
+            });
+          }
+
+          receipts(): readonly DurableTransitionReceipt[] {
+            return this.#withReadTransaction(() => {
+              const meta = this.#meta();
+              const events = this.#eventsForMeta(meta);
+              return this.#receiptsForMeta(meta, events);
+            });
+          }
+          """
+          if old not in t:
+              raise SystemExit('missing public read methods')
+          t = t.replace(old, new, 1)
+
+          old = """        const meta = this.#meta();
+                this.#eventsForMeta(meta);
+                this.#receiptsForMeta(meta);
+                return this.#revisionFromMeta(meta);
+          """
+          new = """        const meta = this.#meta();
+                const events = this.#eventsForMeta(meta);
+                this.#receiptsForMeta(meta, events);
+                return this.#revisionFromMeta(meta);
+          """
+          if old not in t:
+              raise SystemExit('missing integrity read block')
+          t = t.replace(old, new, 1)
+
+          old = """    const resultSnapshot = canonicalJson(result);
+            const verifiedResult = JSON.parse(resultSnapshot) as TransitionVerificationResult;
+          """
+          new = """    const resultSnapshot = canonicalJson(result);
+            const resultSnapshotDigest = digestCanonical(result);
+            const verifiedResult = JSON.parse(resultSnapshot) as TransitionVerificationResult;
+          """
+          if old not in t:
+              raise SystemExit('missing result snapshot block')
+          t = t.replace(old, new, 1)
+
+          old = """      const currentEvents = this.#eventsForMeta(meta);
+              const existingReceipts = this.#receiptsForMeta(meta);
+              const duplicate = existingReceipts.find(
+                (receipt) => receipt.audit.resultDigest === verifiedResult.resultDigest,
+              );
+              if (duplicate !== undefined) {
+                if (meta.canonical_fingerprint !== verifiedResult.afterFingerprint) {
+                  throw new Error('result digest already exists but canonical memory no longer matches it');
+                }
+          """
+          new = """      const currentEvents = this.#eventsForMeta(meta);
+              const existingReceipts = this.#receiptsForMeta(meta, currentEvents);
+              const duplicate = existingReceipts.find(
+                (receipt) => receipt.audit.resultDigest === verifiedResult.resultDigest,
+              );
+              if (duplicate !== undefined) {
+                if (duplicate.resultSnapshotDigest !== resultSnapshotDigest) {
+                  throw new Error('result digest already exists but the retry payload does not match it');
+                }
+                if (
+                  fingerprintMemoryEvents(currentEvents.slice(0, duplicate.eventCountAfter)) !==
+                  duplicate.audit.afterFingerprint
+                ) {
+                  throw new Error('existing transition receipt no longer matches its canonical prefix');
+                }
+          """
+          if old not in t:
+              raise SystemExit('missing idempotent retry block')
+          t = t.replace(old, new, 1)
+
+          old = """      const auditJson = canonicalJson(audit);
+              const auditRecordDigest = digestCanonical(audit);
+              const receiptDigest = nextReceiptChainDigest(meta.last_receipt_digest, auditRecordDigest);
+          """
+          new = """      const auditJson = canonicalJson(audit);
+              const eventCountAfter = nextEvents.length;
+              const auditRecordDigest = digestCanonical({
+                audit,
+                resultSnapshotDigest,
+                eventCountAfter,
+              });
+              const receiptDigest = nextReceiptChainDigest(meta.last_receipt_digest, auditRecordDigest);
+          """
+          if old not in t:
+              raise SystemExit('missing receipt digest block')
+          t = t.replace(old, new, 1)
+
+          old = """          INSERT INTO cl_transition_receipts (
+                    seq, id, result_digest, record_json, record_digest,
+                    previous_receipt_digest, receipt_digest
+                  ) VALUES (?, ?, ?, ?, ?, ?, ?)
+          """
+          new = """          INSERT INTO cl_transition_receipts (
+                    seq, id, result_digest, result_snapshot_digest, event_count_after,
+                    record_json, record_digest, previous_receipt_digest, receipt_digest
+                  ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+          """
+          if old not in t:
+              raise SystemExit('missing receipt insert SQL')
+          t = t.replace(old, new, 1)
+
+          old = """          audit.resultDigest,
+                    auditJson,
+                    auditRecordDigest,
+                    meta.last_receipt_digest,
+                    receiptDigest,
+          """
+          new = """          audit.resultDigest,
+                    resultSnapshotDigest,
+                    eventCountAfter,
+                    auditJson,
+                    auditRecordDigest,
+                    meta.last_receipt_digest,
+                    receiptDigest,
+          """
+          if old not in t:
+              raise SystemExit('missing receipt insert values')
+          t = t.replace(old, new, 1)
+
+          old = """      const receipt: DurableTransitionReceipt = Object.freeze({
+                audit,
+                previousReceiptDigest: meta.last_receipt_digest,
+                auditRecordDigest,
+                receiptDigest,
+              });
+          """
+          new = """      const receipt: DurableTransitionReceipt = Object.freeze({
+                audit,
+                resultSnapshotDigest,
+                eventCountAfter,
+                previousReceiptDigest: meta.last_receipt_digest,
+                auditRecordDigest,
+                receiptDigest,
+              });
+          """
+          if old not in t:
+              raise SystemExit('missing returned receipt block')
+          t = t.replace(old, new, 1)
+          p.write_text(t)
+
+          p = Path('test/sqlite-canonical-ledger.test.mjs')
+          t = p.read_text()
+          marker = "test('event-row or receipt-row tampering is detected on reopen', () => {\n"
+          addition = """test('an exact idempotent retry remains valid after later transitions advance the ledger', () => {
+            withDatabase((path) => {
+              const store = new SqliteCanonicalLedger(path);
+              const first = acceptedCapture(store.events(), 'idempotent-first', 45);
+              store.commitVerifiedTransition(
+                first,
+                trustedCommitter,
+                { id: 'receipt/idempotent-first', recordedAt: 46, actor: 'durable-host' },
+              );
+              const second = acceptedCapture(store.events(), 'idempotent-second', 47);
+              store.commitVerifiedTransition(
+                second,
+                trustedCommitter,
+                { id: 'receipt/idempotent-second', recordedAt: 48, actor: 'durable-host' },
+              );
+
+              let capabilityCalled = false;
+              const retried = store.commitVerifiedTransition(
+                first,
+                () => {
+                  capabilityCalled = true;
+                  throw new Error('historical idempotent retry must not consume the capability');
+                },
+                { id: 'receipt/idempotent-retry', recordedAt: 49, actor: 'durable-host' },
+              );
+              assert.equal(retried.idempotent, true);
+              assert.equal(capabilityCalled, false);
+              assert.equal(retried.receipt.audit.resultDigest, first.resultDigest);
+              assert.equal(store.revision().eventCount, 2);
+              assert.equal(store.revision().receiptCount, 2);
+              store.close();
+            });
+          });
+
+          test('a copied result digest cannot launder a different retry payload', () => {
+            withDatabase((path) => {
+              const store = new SqliteCanonicalLedger(path);
+              const original = acceptedCapture(store.events(), 'retry-original', 52);
+              store.commitVerifiedTransition(
+                original,
+                trustedCommitter,
+                { id: 'receipt/retry-original', recordedAt: 53, actor: 'durable-host' },
+              );
+              const forged = structuredClone(original);
+              forged.proposalId = 'proposal/forged-with-copied-result-digest';
+              assert.throws(
+                () =>
+                  store.commitVerifiedTransition(
+                    forged,
+                    () => {
+                      throw new Error('forged retry must not reach the capability');
+                    },
+                    { id: 'receipt/forged', recordedAt: 54, actor: 'durable-host' },
+                  ),
+                /retry payload does not match/,
+              );
+              assert.equal(store.revision().eventCount, 1);
+              assert.equal(store.revision().receiptCount, 1);
+              store.close();
+            });
+          });
+
+          """
+          if marker not in t:
+              raise SystemExit('missing durable test insertion point')
+          p.write_text(t.replace(marker, addition + marker, 1))
+
+          p = Path('docs/DURABLE_LEDGER.md')
+          t = p.read_text()
+          old = """When the current canonical fingerprint still equals the result's `afterFingerprint`, the store returns the prior receipt without consuming the transition capability or appending a second copy.
+
+          A reused result digest that points at a different canonical state is treated as corruption or conflict, not as a successful retry.
+          """
+          new = """The store persists a digest of the exact accepted result payload and the canonical event boundary immediately after that transition. An exact retry therefore remains idempotent even when later accepted transitions have advanced the current ledger: the stored receipt must still match its historical canonical prefix.
+
+          Copying an old `resultDigest` into a different payload is rejected. A reused digest whose payload or historical event boundary no longer matches is treated as corruption or conflict, not as a successful retry.
+          """
+          if old not in t:
+              raise SystemExit('missing idempotency documentation')
+          p.write_text(t.replace(old, new, 1))
+          PY
+      - name: Verify, remove this one-shot workflow, and publish
+        run: |
+          npm ci --ignore-scripts --no-audit --no-fund
+          npm run check
+          git diff --check
+          rm .github/workflows/review-durable-ledger-v2.yml
+          git config user.name metaforismo
+          git config user.email 39646696+metaforismo@users.noreply.github.com
+          git add -A
+          git commit -m "fix: bind durable retries to exact historical receipts"
+          git push origin HEAD:feat/durable-canonical-ledger-v1
+      - name: Note the adversarial fix on the draft PR
+        shell: bash
+        run: |
+          number="$(gh pr list --repo metaforismo/continual-learning --head feat/durable-canonical-ledger-v1 --state open --json number --jq '.[0].number // empty')"
+          if [ -n "$number" ]; then
+            gh pr comment "$number" --repo metaforismo/continual-learning --body 'Second adversarial pass binds idempotency to the exact result snapshot and historical event boundary, permits safe retries after later transitions, validates event/receipt chains on every canonical read, and rejects copied result-digest laundering.'
+          fi
