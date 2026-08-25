@@ -1,0 +1,38 @@
+name: FTS5 repeat verification (temporary)
+
+on:
+  push:
+    branches:
+      - feat/fts5-projection-v1-final
+
+permissions:
+  contents: read
+
+jobs:
+  repeat:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22.16.0
+      - run: npm ci --ignore-scripts --no-audit --no-fund
+      - name: Verify FTS5 runtime capability
+        run: |
+          node --no-warnings - <<'NODE'
+          const { DatabaseSync } = require('node:sqlite');
+          const db = new DatabaseSync(':memory:');
+          const options = db.prepare('PRAGMA compile_options').all().map((row) => Object.values(row)[0]);
+          if (!options.includes('ENABLE_FTS5')) throw new Error('Node SQLite build lacks ENABLE_FTS5');
+          db.exec('CREATE VIRTUAL TABLE probe USING fts5(content)');
+          db.close();
+          NODE
+      - run: npm run build
+      - name: Repeat FTS5 suites 25 times
+        shell: bash
+        run: |
+          set -euo pipefail
+          for iteration in $(seq 1 25); do
+            echo "FTS5 verification iteration ${iteration}/25"
+            node --test test/fts5-projection*.test.mjs
+          done
