@@ -1,0 +1,43 @@
+name: Apply final FTS5 patch (temporary)
+
+on:
+  push:
+    branches:
+      - feat/fts5-projection-v1-final
+
+permissions:
+  contents: write
+
+jobs:
+  apply:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: feat/fts5-projection-v1-final
+          fetch-depth: 0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Apply exact reviewed patch
+        shell: bash
+        run: |
+          set -euo pipefail
+          cat .tmp/fts-patch.* | base64 -d | gunzip > /tmp/fts-final.patch
+          echo '6323fad4d428a37fdac5c0af6c05d1e252d21bd2b7d1d9a5b01b2f63bdbb0db9  /tmp/fts-final.patch' | sha256sum -c -
+          git apply --check /tmp/fts-final.patch
+          git apply --index /tmp/fts-final.patch
+          rm -rf .tmp
+          rm .github/workflows/apply-fts5-final.yml
+      - name: Verify final branch
+        run: |
+          npm ci --ignore-scripts --no-audit --no-fund
+          npm run check
+          git diff --check --cached
+      - name: Commit final branch
+        run: |
+          git config user.name metaforismo
+          git config user.email 39646696+metaforismo@users.noreply.github.com
+          git add -A
+          git commit -m 'fix: harden and finalize FTS5 projection'
+          git push origin HEAD:feat/fts5-projection-v1-final
