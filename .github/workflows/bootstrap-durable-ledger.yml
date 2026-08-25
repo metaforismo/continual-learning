@@ -1,0 +1,104 @@
+name: Bootstrap durable canonical ledger
+
+on:
+  push:
+    branches:
+      - feat/durable-canonical-ledger-v1
+
+permissions:
+  contents: write
+  pull-requests: read
+
+concurrency:
+  group: bootstrap-durable-ledger
+  cancel-in-progress: false
+
+jobs:
+  bootstrap:
+    runs-on: ubuntu-24.04
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: feat/durable-canonical-ledger-v1
+          fetch-depth: 0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22.23.2
+      - name: Require the reviewed FTS5 base and merge current main
+        shell: bash
+        run: |
+          for _ in $(seq 1 60); do
+            merged="$(gh pr view 6 --repo metaforismo/continual-learning --json mergedAt --jq '.mergedAt // ""' 2>/dev/null || true)"
+            if [ -n "$merged" ]; then
+              break
+            fi
+            sleep 5
+          done
+          test -n "$merged"
+          git fetch origin main
+          git merge --no-edit origin/main
+          test -f src/retrieval/fts5.ts
+      - name: Harden the storage implementation and public exports
+        shell: bash
+        run: |
+          python <<'PY'
+          from pathlib import Path
+
+          path = Path('src/storage/sqlite-ledger.ts')
+          text = path.read_text()
+          old = """    const report = this.verifyIntegrity();
+            if (!report.ok) {
+              throw new Error(`durable ledger integrity failed: ${report.errors.join('; ')}`);
+            }
+"""
+          new = """    const report = this.verifyIntegrity();
+            if (!report.ok) {
+              this.#db.close();
+              this.#closed = true;
+              throw new Error(`durable ledger integrity failed: ${report.errors.join('; ')}`);
+            }
+"""
+          if old not in text:
+              raise SystemExit('missing constructor integrity block')
+          text = text.replace(old, new, 1)
+
+          old = """      for (const event of append) {
+                if (event.seq !== meta.last_seq + (event.seq - meta.last_seq)) {
+                  // The semantic replay below is authoritative; this branch keeps the error local and clear.
+                }
+                if (event.seq !== meta.last_seq + append.indexOf(event) + 1) {
+                  throw new Error(`staged append sequence is not contiguous at event ${event.id}`);
+                }
+"""
+          new = """      for (let appendIndex = 0; appendIndex < append.length; appendIndex += 1) {
+                const event = append[appendIndex];
+                if (event === undefined) throw new Error('staged append iteration failed');
+                if (event.seq !== meta.last_seq + appendIndex + 1) {
+                  throw new Error(`staged append sequence is not contiguous at event ${event.id}`);
+                }
+"""
+          if old not in text:
+              raise SystemExit('missing staged append loop')
+          text = text.replace(old, new, 1)
+          path.write_text(text)
+
+          root = Path('src/index.ts')
+          root_text = root.read_text()
+          export = "export * from './storage/index.js';\n"
+          if export not in root_text:
+              root.write_text(root_text + export)
+          PY
+          npm install --save-dev --save-exact @types/node@22 --ignore-scripts --no-audit --no-fund
+      - name: Verify exact branch and remove the one-shot workflow
+        run: |
+          npm ci --ignore-scripts --no-audit --no-fund
+          npm run check
+          git diff --check
+          rm .github/workflows/bootstrap-durable-ledger.yml
+          git config user.name metaforismo
+          git config user.email 39646696+metaforismo@users.noreply.github.com
+          git add -A
+          git commit -m "feat: add atomic durable canonical ledger"
+          git push origin HEAD:feat/durable-canonical-ledger-v1
