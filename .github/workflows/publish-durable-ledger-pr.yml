@@ -1,0 +1,96 @@
+name: Publish durable-ledger draft PR
+
+on:
+  push:
+    branches:
+      - feat/durable-canonical-ledger-v1
+
+permissions:
+  contents: write
+  pull-requests: write
+
+concurrency:
+  group: bootstrap-durable-ledger
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    runs-on: ubuntu-24.04
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: feat/durable-canonical-ledger-v1
+          fetch-depth: 0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22.23.2
+      - name: Require the clean bootstrapped branch
+        run: |
+          git fetch origin main feat/durable-canonical-ledger-v1
+          git reset --hard origin/feat/durable-canonical-ledger-v1
+          test -f src/retrieval/fts5.ts
+          test -f src/storage/sqlite-ledger.ts
+          test ! -f .github/workflows/bootstrap-durable-ledger.yml
+          npm ci --ignore-scripts --no-audit --no-fund
+          npm run check
+          git diff --check origin/main...HEAD
+          if git diff --name-only origin/main...HEAD | grep -E '^(dist/|node_modules/|.*\.sqlite($|-)|.*debug.*)'; then
+            echo 'Generated or debug artifacts are not allowed in the durable-ledger PR' >&2
+            exit 1
+          fi
+      - name: Remove one-shot publisher and push final draft head
+        run: |
+          rm .github/workflows/publish-durable-ledger-pr.yml
+          git config user.name metaforismo
+          git config user.email 39646696+metaforismo@users.noreply.github.com
+          git add -A
+          git commit -m "chore: remove the one-shot durable-ledger publisher"
+          git push origin HEAD:feat/durable-canonical-ledger-v1
+      - name: Open or update the draft pull request
+        shell: bash
+        run: |
+          existing="$(gh pr list --repo metaforismo/continual-learning --head feat/durable-canonical-ledger-v1 --state open --json number --jq '.[0].number // empty')"
+          body_file="$(mktemp)"
+          cat > "$body_file" <<'EOF'
+          ## Summary
+
+          Adds the first durable canonical event store and closes the crash-consistency gap between accepted memory transitions and long-term memory.
+
+          > Canonical events, the transition receipt, and the revision metadata become visible together or not at all.
+
+          ## Initial implementation
+
+          - SQLite `BEGIN IMMEDIATE` commit boundary;
+          - exact canonical-base compare-and-swap under the write lock;
+          - canonical event rows with payload digests and an event hash chain;
+          - transition audit receipts with an independent receipt hash chain;
+          - atomic event + receipt + metadata update;
+          - process-reopen replay and integrity verification;
+          - idempotent result-digest recovery after an ambiguous client retry;
+          - whole-ledger optimistic concurrency for competing writers;
+          - trusted transition-committer capability with exact prefix, append, and fingerprint checks;
+          - deterministic fault injection at every pre-commit phase;
+          - tamper, stale-writer, rollback, prefix-rewrite, and restart tests.
+
+          ## Review status
+
+          Draft. The API, SQL schema, receipt semantics, temporal invariants, corruption behavior, and integration with the process-local transition capability still require adversarial review before readiness.
+
+          ## Explicit limitations
+
+          This does not yet provide authenticated actors, signatures, artifact-byte storage, migration of an existing non-empty ledger, per-belief partitions, incremental checkpoints, replication, provenance-closure deletion, or continual-learning benchmark evidence.
+          EOF
+          if [ -z "$existing" ]; then
+            gh pr create --repo metaforismo/continual-learning \
+              --base main \
+              --head feat/durable-canonical-ledger-v1 \
+              --title 'feat: add atomic durable canonical ledger' \
+              --body-file "$body_file" \
+              --draft
+          else
+            gh pr edit "$existing" --repo metaforismo/continual-learning \
+              --title 'feat: add atomic durable canonical ledger' \
+              --body-file "$body_file"
+          fi
