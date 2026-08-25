@@ -38,11 +38,35 @@ jobs:
           rm -rf .tmp
           rm -f .github/workflows/apply-fts5-final.yml
           rm -f .github/workflows/apply-fts5-hex.yml
-      - name: Verify final branch
+      - name: Install dependencies
+        shell: bash
         run: |
-          npm ci --ignore-scripts --no-audit --no-fund
-          npm run check
-          git diff --check --cached
+          set -o pipefail
+          npm ci --ignore-scripts --no-audit --no-fund 2>&1 | tee /tmp/npm-ci.log || {
+            echo '--- npm ci failure ---'
+            tail -n 120 /tmp/npm-ci.log
+            exit 1
+          }
+      - name: Build
+        shell: bash
+        run: |
+          set -o pipefail
+          npm run build 2>&1 | tee /tmp/build.log || {
+            echo '--- build failure ---'
+            tail -n 160 /tmp/build.log
+            exit 1
+          }
+      - name: Test
+        shell: bash
+        run: |
+          set -o pipefail
+          node --test test/*.test.mjs 2>&1 | tee /tmp/test.log || {
+            echo '--- test failure ---'
+            tail -n 220 /tmp/test.log
+            exit 1
+          }
+      - name: Check staged diff
+        run: git diff --check --cached
       - name: Commit final branch
         run: |
           git config user.name metaforismo
