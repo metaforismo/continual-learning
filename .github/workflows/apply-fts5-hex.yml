@@ -36,8 +36,8 @@ jobs:
           git apply --check /tmp/fts-product.patch
           git apply --index /tmp/fts-product.patch
           rm -rf .tmp
-          rm .github/workflows/apply-fts5-final.yml
-          rm .github/workflows/apply-fts5-hex.yml
+          rm -f .github/workflows/apply-fts5-final.yml
+          rm -f .github/workflows/apply-fts5-hex.yml
       - name: Verify final branch
         run: |
           npm ci --ignore-scripts --no-audit --no-fund
