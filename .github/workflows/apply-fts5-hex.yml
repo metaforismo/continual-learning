@@ -30,7 +30,7 @@ jobs:
               bytes.fromhex(Path('/tmp/fts-product.hex').read_text())
           )
           PY
-          echo 'f9ec2f74961c7a5fd28163fa610230400271a1eb2d26f19feafe922849e48b61  /tmp/fts-product.patch.gz' | sha256sum -c -
+          gunzip -t /tmp/fts-product.patch.gz
           gunzip -c /tmp/fts-product.patch.gz > /tmp/fts-product.patch
           echo '6323fad4d428a37fdac5c0af6c05d1e252d21bd2b7d1d9a5b01b2f63bdbb0db9  /tmp/fts-product.patch' | sha256sum -c -
           git apply --check /tmp/fts-product.patch
