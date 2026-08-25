@@ -26,14 +26,14 @@ Exit gate: all Level 1 evidence requirements in [EVALUATION.md](EVALUATION.md).
 ## Phase 1 — Durable local memory substrate
 
 - SQLite event ledger and projection checkpoints;
-- FTS5 lexical index;
+- [x] rebuildable FTS5 lexical candidate projection with canonical rehydration;
 - pluggable embedding interface and optional vector index;
 - association and temporal indexes;
 - hot/warm/cold storage boundaries;
-- index watermarks and rebuild commands;
+- [x] configuration-bound projection watermarks, full manifests, atomic rebuild, and fork detection;
 - [x] source/artifact content-addressing contract;
 - artifact/blob provider with digest verification;
-- evidence metadata persistence and projection checkpoints;
+- evidence metadata persistence and incremental projection checkpoints;
 - export, inspect, supersede, suppress, and forget APIs;
 - deterministic replay against persisted fixtures.
 

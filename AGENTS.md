@@ -20,6 +20,10 @@ Inspect the current repository, branch, pull requests, workflows, tests, and rec
 - Do not destructively replace raw episodes with summaries.
 - Raw sensitive bytes stay outside the immutable event log; metadata and tombstones remain auditable.
 - Retrieval does not imply authorization.
+- Retrieval indexes are rebuildable caches, never canonical truth. Search results must be canonically rehydrated before context or action.
+- Retriever ranks and scores are advisory candidate-routing signals, not evidence authority or state truth.
+- A retrieval miss is not evidence of absence; exhaustive claims require an explicit coverage protocol.
+- Transaction lifecycle (`active` or `superseded`) is not a substitute for bitemporal state adjudication.
 - State adjudication is deterministic at the correctness boundary; models may propose candidates but do not silently choose current truth.
 - Current, historical, disputed, unknown-current, and unknown state must remain distinguishable.
 - Ineligible claims must not affect ranking, confidence, invalidation, or context provenance indirectly.
