@@ -3,20 +3,22 @@ import { DatabaseSync } from 'node:sqlite';
 import { ClaimProjection } from '../claims.js';
 import type { ClaimLifecycle, EvidenceRecord, MemoryEvent } from '../domain.js';
 import { EvidenceProjection } from '../evidence.js';
+import { MemoryKernel } from '../kernel.js';
 import { fingerprintMemoryEvents } from '../transitions/verifier.js';
 import {
-  assertScopeChain,
   buildDocuments,
   claimText,
   contentDigest,
   documentDigest,
   evidenceText,
   manifestDigest,
-  normalizeView,
+  normalizeClaimLifecycleFilter,
+  projectionConfigDigest,
   safeMatchQuery,
   searchableClaim,
   searchableEvidence,
   SHA256_PATTERN,
+  snapshotScopeChain,
   type IndexedDocument,
 } from './canonical.js';
 import {
@@ -34,6 +36,7 @@ import {
 
 const DEFAULT_LIMIT = 20;
 const MAX_LIMIT = 100;
+const MAX_REHYDRATE_CANDIDATES = 100;
 const META_ROW_ID = 1;
 
 interface MetaRow {
@@ -44,6 +47,7 @@ interface MetaRow {
   readonly canonical_fingerprint: string;
   readonly entry_count: number;
   readonly manifest_digest: string;
+  readonly config_digest: string;
   readonly rebuilt_at: number;
 }
 
@@ -60,7 +64,9 @@ interface SearchRow {
 }
 
 function snapshot(events: readonly MemoryEvent[]): Fts5ProjectionSnapshot {
-  const canonicalEvents = Object.freeze([...events]);
+  // Canonicalize exactly once. Fingerprinting, projection, and rehydration use the same immutable
+  // semantic replay rather than rereading caller-owned objects or stateful getters.
+  const canonicalEvents = MemoryKernel.from(events).events();
   return Object.freeze({
     events: canonicalEvents,
     fingerprint: fingerprintMemoryEvents(canonicalEvents),
@@ -75,16 +81,22 @@ function rowAsMeta(value: unknown): MetaRow | undefined {
     !Number.isInteger(row.schema_version) ||
     typeof row.active_generation !== 'number' ||
     !Number.isInteger(row.active_generation) ||
+    row.active_generation <= 0 ||
     typeof row.event_count !== 'number' ||
     !Number.isInteger(row.event_count) ||
+    row.event_count < 0 ||
     typeof row.last_seq !== 'number' ||
     !Number.isInteger(row.last_seq) ||
+    row.last_seq < 0 ||
     typeof row.canonical_fingerprint !== 'string' ||
     typeof row.entry_count !== 'number' ||
     !Number.isInteger(row.entry_count) ||
+    row.entry_count < 0 ||
     typeof row.manifest_digest !== 'string' ||
+    typeof row.config_digest !== 'string' ||
     typeof row.rebuilt_at !== 'number' ||
-    !Number.isInteger(row.rebuilt_at)
+    !Number.isInteger(row.rebuilt_at) ||
+    row.rebuilt_at < 0
   ) {
     throw new Error('FTS projection metadata is malformed');
   }
@@ -101,6 +113,9 @@ function watermarkFromRow(row: MetaRow): Fts5ProjectionWatermark {
   if (!SHA256_PATTERN.test(row.manifest_digest)) {
     throw new Error('FTS projection manifest digest is malformed');
   }
+  if (!SHA256_PATTERN.test(row.config_digest)) {
+    throw new Error('FTS projection config digest is malformed');
+  }
   return Object.freeze({
     schemaVersion: FTS5_PROJECTION_SCHEMA_VERSION,
     generation: row.active_generation,
@@ -109,7 +124,31 @@ function watermarkFromRow(row: MetaRow): Fts5ProjectionWatermark {
     canonicalFingerprint: row.canonical_fingerprint,
     entryCount: row.entry_count,
     manifestDigest: row.manifest_digest,
+    configDigest: row.config_digest,
     rebuiltAt: row.rebuilt_at,
+  });
+}
+
+function snapshotCandidate(candidate: Fts5SearchCandidate): Fts5SearchCandidate {
+  const canonicalId = candidate.canonicalId;
+  const kind = candidate.kind;
+  const scope = candidate.scope;
+  const lifecycle = candidate.lifecycle;
+  const rank = candidate.rank;
+  const score = candidate.score;
+  const entryDigest = candidate.entryDigest;
+  const canonicalFingerprint = candidate.canonicalFingerprint;
+  const generation = candidate.generation;
+  return Object.freeze({
+    canonicalId,
+    kind,
+    scope,
+    ...(lifecycle === undefined ? {} : { lifecycle }),
+    rank,
+    score,
+    entryDigest,
+    canonicalFingerprint,
+    generation,
   });
 }
 
@@ -121,6 +160,8 @@ export class SqliteFts5Projection {
   readonly #db: Fts5ProjectionDatabase;
   readonly #ownsDatabase: boolean;
   readonly #allowedSensitivities: ReadonlySet<EvidenceRecord['sensitivity']>;
+  readonly #indexClaimValues: boolean;
+  readonly #configDigest: string;
   readonly #faultInjector: Fts5ProjectionOptions['faultInjector'] | undefined;
   #closed = false;
 
@@ -131,7 +172,15 @@ export class SqliteFts5Projection {
   ) {
     this.#db = database;
     this.#ownsDatabase = ownsDatabase;
-    const sensitivities = options.searchableSensitivities ?? ['public', 'internal'];
+
+    const suppliedSensitivities = options.searchableSensitivities;
+    const sensitivities = Object.freeze([
+      ...(suppliedSensitivities ?? ['public', 'internal']),
+    ]);
+    const indexClaimValues = options.indexClaimValues;
+    const busyTimeoutMs = options.busyTimeoutMs;
+    const faultInjector = options.faultInjector;
+
     if (sensitivities.length === 0 || new Set(sensitivities).size !== sensitivities.length) {
       throw new Error('searchableSensitivities must be non-empty and unique');
     }
@@ -140,13 +189,24 @@ export class SqliteFts5Projection {
         throw new Error(`unknown evidence sensitivity: ${String(sensitivity)}`);
       }
     }
+    if (indexClaimValues !== undefined && typeof indexClaimValues !== 'boolean') {
+      throw new TypeError('indexClaimValues must be boolean');
+    }
+    if (faultInjector !== undefined && typeof faultInjector !== 'function') {
+      throw new TypeError('faultInjector must be a function');
+    }
+
     this.#allowedSensitivities = new Set(sensitivities);
-    this.#faultInjector = options.faultInjector;
-    this.#initialize(options.busyTimeoutMs ?? 5_000);
+    this.#indexClaimValues = indexClaimValues ?? false;
+    this.#configDigest = projectionConfigDigest(sensitivities, this.#indexClaimValues);
+    this.#faultInjector = faultInjector;
+    this.#initialize(busyTimeoutMs ?? 5_000);
   }
 
   static open(filename: string, options: Fts5ProjectionOptions = {}): SqliteFts5Projection {
-    if (filename.trim().length === 0) throw new Error('FTS projection filename cannot be empty');
+    if (typeof filename !== 'string' || filename.trim().length === 0) {
+      throw new Error('FTS projection filename cannot be empty');
+    }
     const database = new DatabaseSync(filename) as unknown as Fts5ProjectionDatabase;
     return new SqliteFts5Projection(database, options, true);
   }
@@ -155,6 +215,7 @@ export class SqliteFts5Projection {
     if (!Number.isInteger(busyTimeoutMs) || busyTimeoutMs < 0 || busyTimeoutMs > 60_000) {
       throw new RangeError('busyTimeoutMs must be an integer in [0, 60000]');
     }
+    this.#db.exec('PRAGMA trusted_schema = OFF');
     this.#db.exec(`PRAGMA busy_timeout = ${busyTimeoutMs}`);
     this.#db.exec('PRAGMA journal_mode = WAL');
     this.#db.exec('PRAGMA synchronous = FULL');
@@ -168,6 +229,7 @@ export class SqliteFts5Projection {
         canonical_fingerprint TEXT NOT NULL,
         entry_count INTEGER NOT NULL,
         manifest_digest TEXT NOT NULL,
+        config_digest TEXT NOT NULL,
         rebuilt_at INTEGER NOT NULL
       ) STRICT;
     `);
@@ -201,7 +263,7 @@ export class SqliteFts5Projection {
       this.#db
         .prepare(
           `SELECT schema_version, active_generation, event_count, last_seq,
-                  canonical_fingerprint, entry_count, manifest_digest, rebuilt_at
+                  canonical_fingerprint, entry_count, manifest_digest, config_digest, rebuilt_at
              FROM cl_fts_meta WHERE singleton = ?`,
         )
         .get(META_ROW_ID),
@@ -211,6 +273,23 @@ export class SqliteFts5Projection {
 
   watermark(): Fts5ProjectionWatermark | undefined {
     return this.#meta();
+  }
+
+  #withReadTransaction<T>(operation: () => T): T {
+    this.#assertOpen();
+    this.#db.exec('BEGIN');
+    try {
+      const result = operation();
+      this.#db.exec('COMMIT');
+      return result;
+    } catch (error) {
+      try {
+        this.#db.exec('ROLLBACK');
+      } catch {
+        // Preserve the original failure. Reopen/rebuild remains the cache recovery boundary.
+      }
+      throw error;
+    }
   }
 
   #generationIntegrityFailure(watermark: Fts5ProjectionWatermark): string | undefined {
@@ -228,17 +307,35 @@ export class SqliteFts5Projection {
     }
 
     const documents: IndexedDocument[] = [];
+    const identities = new Set<string>();
     for (const row of rows) {
       if (row.kind !== 'evidence' && row.kind !== 'claim') {
         return `active generation contains unknown document kind ${row.kind}`;
       }
+      if (
+        typeof row.canonical_id !== 'string' ||
+        row.canonical_id.trim().length === 0 ||
+        typeof row.scope !== 'string' ||
+        row.scope.trim().length === 0 ||
+        typeof row.search_text !== 'string' ||
+        !Number.isInteger(row.generation) ||
+        row.generation !== watermark.generation
+      ) {
+        return `row ${row.kind}/${String(row.canonical_id)} contains malformed identity or generation metadata`;
+      }
+      const identity = `${row.kind}\u0000${row.canonical_id}`;
+      if (identities.has(identity)) return `active generation repeats ${row.kind}/${row.canonical_id}`;
+      identities.add(identity);
+
       const lifecycle =
         row.kind === 'claim'
           ? row.lifecycle === 'active' || row.lifecycle === 'superseded'
             ? row.lifecycle
             : undefined
-          : '';
-      if (lifecycle === undefined) return `claim ${row.canonical_id} has an invalid lifecycle`;
+          : row.lifecycle === ''
+            ? ''
+            : undefined;
+      if (lifecycle === undefined) return `${row.kind} ${row.canonical_id} has an invalid lifecycle`;
       if (!SHA256_PATTERN.test(row.source_digest) || !SHA256_PATTERN.test(row.entry_digest)) {
         return `row ${row.kind}/${row.canonical_id} contains a malformed digest`;
       }
@@ -260,8 +357,7 @@ export class SqliteFts5Projection {
       : 'active generation manifest does not match its watermark';
   }
 
-  status(events: readonly MemoryEvent[]): Fts5ProjectionStatus {
-    const current = snapshot(events);
+  #statusForSnapshot(current: Fts5ProjectionSnapshot): Fts5ProjectionStatus {
     const watermark = this.#meta();
     if (watermark === undefined) {
       return Object.freeze({
@@ -270,6 +366,16 @@ export class SqliteFts5Projection {
         canonicalFingerprint: current.fingerprint,
         eventCount: current.events.length,
         reason: 'projection has not been built',
+      });
+    }
+    if (watermark.configDigest !== this.#configDigest) {
+      return Object.freeze({
+        initialized: true,
+        fresh: false,
+        watermark,
+        canonicalFingerprint: current.fingerprint,
+        eventCount: current.events.length,
+        reason: 'projection configuration does not match the active host policy',
       });
     }
     const integrityFailure = this.#generationIntegrityFailure(watermark);
@@ -293,35 +399,59 @@ export class SqliteFts5Projection {
     });
   }
 
+  status(events: readonly MemoryEvent[]): Fts5ProjectionStatus {
+    const current = snapshot(events);
+    return this.#withReadTransaction(() => this.#statusForSnapshot(current));
+  }
+
   rebuild(events: readonly MemoryEvent[], rebuiltAt = Date.now()): Fts5ProjectionWatermark {
     this.#assertOpen();
     if (!Number.isInteger(rebuiltAt) || rebuiltAt < 0) {
-      throw new RangeError('rebuiltAt must be a non-negative integer epoch millisecond value');
+      throw new RangeError('rebuiltAt must be a non-negative integer');
     }
     const current = snapshot(events);
-    const documents = buildDocuments(current.events, this.#allowedSensitivities);
+    const documents = buildDocuments(
+      current.events,
+      this.#allowedSensitivities,
+      this.#indexClaimValues,
+    );
     const nextManifestDigest = manifestDigest(documents);
+    const currentLastSeq = current.events.at(-1)?.seq ?? 0;
 
     this.#db.exec('BEGIN IMMEDIATE');
     try {
       this.#faultInjector?.('after-begin');
-      // Read after acquiring the write lock so concurrent rebuilders cannot choose the same or an
-      // older generation from a stale pre-transaction observation.
       const existing = this.#meta();
-      const currentLastSeq = current.events.at(-1)?.seq ?? 0;
-      if (existing !== undefined) {
-        if (existing.eventCount > current.events.length || existing.lastSeq > currentLastSeq) {
-          throw new Error('FTS rebuild cannot regress an existing canonical watermark');
-        }
+      if (
+        existing !== undefined &&
+        (current.events.length < existing.eventCount || currentLastSeq < existing.lastSeq)
+      ) {
+        throw new Error('FTS rebuild cannot regress an existing canonical watermark');
+      }
+      if (
+        existing !== undefined &&
+        current.events.length === existing.eventCount &&
+        currentLastSeq === existing.lastSeq &&
+        existing.canonicalFingerprint !== current.fingerprint
+      ) {
+        throw new Error('FTS rebuild detected a same-length canonical fork');
+      }
+      if (existing !== undefined && current.events.length > existing.eventCount) {
+        const projectedPrefix = current.events.slice(0, existing.eventCount);
+        const prefixLastSeq = projectedPrefix.at(-1)?.seq ?? 0;
+        const prefixFingerprint = fingerprintMemoryEvents(projectedPrefix);
         if (
-          existing.eventCount === current.events.length &&
-          (existing.lastSeq !== currentLastSeq ||
-            existing.canonicalFingerprint !== current.fingerprint)
+          prefixLastSeq !== existing.lastSeq ||
+          prefixFingerprint !== existing.canonicalFingerprint
         ) {
-          throw new Error('FTS rebuild detected a same-length canonical fork');
+          throw new Error('FTS rebuild detected a canonical fork before the new append range');
         }
       }
+
       const generation = (existing?.generation ?? 0) + 1;
+      if (!Number.isSafeInteger(generation) || generation <= 0) {
+        throw new Error('FTS projection generation overflow');
+      }
       this.#db.prepare('DELETE FROM cl_fts_entries WHERE generation = ?').run(generation);
       this.#faultInjector?.('after-clear-next-generation');
 
@@ -348,8 +478,8 @@ export class SqliteFts5Projection {
         .prepare(`
           INSERT INTO cl_fts_meta(
             singleton, schema_version, active_generation, event_count, last_seq,
-            canonical_fingerprint, entry_count, manifest_digest, rebuilt_at
-          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            canonical_fingerprint, entry_count, manifest_digest, config_digest, rebuilt_at
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
           ON CONFLICT(singleton) DO UPDATE SET
             schema_version = excluded.schema_version,
             active_generation = excluded.active_generation,
@@ -358,6 +488,7 @@ export class SqliteFts5Projection {
             canonical_fingerprint = excluded.canonical_fingerprint,
             entry_count = excluded.entry_count,
             manifest_digest = excluded.manifest_digest,
+            config_digest = excluded.config_digest,
             rebuilt_at = excluded.rebuilt_at
         `)
         .run(
@@ -369,6 +500,7 @@ export class SqliteFts5Projection {
           current.fingerprint,
           documents.length,
           nextManifestDigest,
+          this.#configDigest,
           rebuiltAt,
         );
       this.#faultInjector?.('after-watermark');
@@ -403,76 +535,102 @@ export class SqliteFts5Projection {
     options: Fts5SearchOptions,
   ): readonly Fts5SearchCandidate[] {
     this.#assertOpen();
-    assertScopeChain(options.scopeChain);
-    const view = normalizeView(options.view);
+    const scopeChain = snapshotScopeChain(options.scopeChain);
+    const claimLifecycle = normalizeClaimLifecycleFilter(options.claimLifecycle);
     const limit = options.limit ?? DEFAULT_LIMIT;
     if (!Number.isInteger(limit) || limit <= 0 || limit > MAX_LIMIT) {
       throw new RangeError(`FTS result limit must be an integer in [1, ${MAX_LIMIT}]`);
     }
     const match = safeMatchQuery(query, options.maxQueryTokens);
-    const state = this.status(events);
-    if (!state.fresh || state.watermark === undefined) {
-      throw new Error(`FTS projection is unavailable: ${state.reason}`);
-    }
-    const watermark = state.watermark;
-    const scopePlaceholders = options.scopeChain.map(() => '?').join(', ');
-    const lifecycleClause = view === 'current' ? "AND (kind <> 'claim' OR lifecycle = 'active')" : '';
-    const rows = this.#db
-      .prepare(`
-        SELECT canonical_id, kind, scope, lifecycle, source_digest, entry_digest,
-               search_text, CAST(generation AS INTEGER) AS generation,
-               bm25(cl_fts_entries) AS fts_score
-          FROM cl_fts_entries
-         WHERE cl_fts_entries MATCH ?
-           AND generation = ?
-           AND scope IN (${scopePlaceholders})
-           ${lifecycleClause}
-         ORDER BY fts_score ASC, kind ASC, canonical_id ASC
-         LIMIT ?
-      `)
-      .all(match, watermark.generation, ...options.scopeChain, limit) as unknown as readonly SearchRow[];
+    const current = snapshot(events);
 
-    return Object.freeze(
-      rows.map((row, index) => {
-        if (row.kind !== 'evidence' && row.kind !== 'claim') {
-          throw new Error(`FTS projection contains an unknown document kind: ${row.kind}`);
-        }
-        if (row.generation !== watermark.generation) {
-          throw new Error('FTS projection returned a row from an inactive generation');
-        }
-        const lifecycle =
-          row.kind === 'claim'
-            ? row.lifecycle === 'active' || row.lifecycle === 'superseded'
-              ? row.lifecycle
-              : undefined
-            : undefined;
-        if (row.kind === 'claim' && lifecycle === undefined) {
-          throw new Error(`FTS projection claim ${row.canonical_id} has an invalid lifecycle`);
-        }
-        const base = Object.freeze({
-          canonicalId: row.canonical_id,
-          kind: row.kind,
-          scope: row.scope,
-          lifecycle: lifecycle ?? ('' as const),
-          sourceDigest: row.source_digest,
-          searchText: row.search_text,
-        });
-        if (documentDigest(base) !== row.entry_digest) {
-          throw new Error(`FTS projection row integrity failed for ${row.kind}/${row.canonical_id}`);
-        }
-        return Object.freeze({
-          canonicalId: row.canonical_id,
-          kind: row.kind,
-          scope: row.scope,
-          ...(lifecycle === undefined ? {} : { lifecycle }),
-          rank: index + 1,
-          score: Number.isFinite(row.fts_score) ? -row.fts_score : 0,
-          entryDigest: row.entry_digest,
-          canonicalFingerprint: watermark.canonicalFingerprint,
-          generation: watermark.generation,
-        });
-      }),
-    );
+    return this.#withReadTransaction(() => {
+      const state = this.#statusForSnapshot(current);
+      if (!state.fresh || state.watermark === undefined) {
+        throw new Error(`FTS projection is unavailable: ${state.reason}`);
+      }
+      const watermark = state.watermark;
+      const scopePlaceholders = scopeChain.map(() => '?').join(', ');
+      const lifecycleClause =
+        claimLifecycle === 'active-only'
+          ? "AND (kind <> 'claim' OR lifecycle = 'active')"
+          : '';
+      const rows = this.#db
+        .prepare(`
+          SELECT canonical_id, kind, scope, lifecycle, source_digest, entry_digest,
+                 search_text, CAST(generation AS INTEGER) AS generation,
+                 bm25(cl_fts_entries) AS fts_score
+            FROM cl_fts_entries
+           WHERE cl_fts_entries MATCH ?
+             AND generation = ?
+             AND scope IN (${scopePlaceholders})
+             ${lifecycleClause}
+           ORDER BY fts_score ASC, kind ASC, canonical_id ASC
+           LIMIT ?
+        `)
+        .all(match, watermark.generation, ...scopeChain, limit) as unknown as readonly SearchRow[];
+
+      return Object.freeze(
+        rows.map((row, index) => {
+          if (row.kind !== 'evidence' && row.kind !== 'claim') {
+            throw new Error(`FTS projection contains an unknown document kind: ${row.kind}`);
+          }
+          if (
+            typeof row.canonical_id !== 'string' ||
+            row.canonical_id.trim().length === 0 ||
+            typeof row.scope !== 'string' ||
+            row.scope.trim().length === 0 ||
+            typeof row.search_text !== 'string' ||
+            !Number.isInteger(row.generation) ||
+            row.generation !== watermark.generation
+          ) {
+            throw new Error('FTS projection row contains malformed identity or generation metadata');
+          }
+          if (!SHA256_PATTERN.test(row.source_digest) || !SHA256_PATTERN.test(row.entry_digest)) {
+            throw new Error('FTS projection row contains a malformed digest');
+          }
+          if (typeof row.fts_score !== 'number' || !Number.isFinite(row.fts_score)) {
+            throw new Error('FTS projection returned a malformed BM25 score');
+          }
+          const lifecycle =
+            row.kind === 'claim'
+              ? row.lifecycle === 'active' || row.lifecycle === 'superseded'
+                ? row.lifecycle
+                : undefined
+              : row.lifecycle === ''
+                ? undefined
+                : undefined;
+          if (row.kind === 'claim' && lifecycle === undefined) {
+            throw new Error(`FTS projection claim ${row.canonical_id} has an invalid lifecycle`);
+          }
+          if (row.kind === 'evidence' && row.lifecycle !== '') {
+            throw new Error(`FTS projection evidence ${row.canonical_id} has an invalid lifecycle`);
+          }
+          const base = Object.freeze({
+            canonicalId: row.canonical_id,
+            kind: row.kind,
+            scope: row.scope,
+            lifecycle: lifecycle ?? ('' as const),
+            sourceDigest: row.source_digest,
+            searchText: row.search_text,
+          });
+          if (documentDigest(base) !== row.entry_digest) {
+            throw new Error(`FTS projection row integrity failed for ${row.kind}/${row.canonical_id}`);
+          }
+          return Object.freeze({
+            canonicalId: row.canonical_id,
+            kind: row.kind,
+            scope: row.scope,
+            ...(lifecycle === undefined ? {} : { lifecycle }),
+            rank: index + 1,
+            score: -row.fts_score,
+            entryDigest: row.entry_digest,
+            canonicalFingerprint: watermark.canonicalFingerprint,
+            generation: watermark.generation,
+          });
+        }),
+      );
+    });
   }
 
   rehydrate(
@@ -480,28 +638,48 @@ export class SqliteFts5Projection {
     candidates: readonly Fts5SearchCandidate[],
     options: Fts5RehydrateOptions,
   ): readonly RehydratedFts5Candidate[] {
-    this.#assertOpen();
-    assertScopeChain(options.scopeChain);
-    const view = normalizeView(options.view);
-    const state = this.status(events);
-    if (!state.fresh || state.watermark === undefined) {
-      throw new Error(`FTS projection is unavailable: ${state.reason}`);
+    const scopeChain = snapshotScopeChain(options.scopeChain);
+    if (!Array.isArray(candidates)) throw new TypeError('FTS candidates must be an array');
+    const candidateSnapshot = Object.freeze(Array.from(candidates, snapshotCandidate));
+    if (candidateSnapshot.length > MAX_REHYDRATE_CANDIDATES) {
+      throw new RangeError(
+        `FTS rehydration cannot exceed ${MAX_REHYDRATE_CANDIDATES} candidates`,
+      );
     }
-    const watermark = state.watermark;
-    const allowedScopes = new Set(options.scopeChain);
-    const evidence = EvidenceProjection.from(events);
-    const claims = ClaimProjection.from(events);
+    const claimLifecycle = normalizeClaimLifecycleFilter(options.claimLifecycle);
+    const current = snapshot(events);
+    const allowedScopes = new Set(scopeChain);
+    const evidence = EvidenceProjection.from(current.events);
+    const claims = ClaimProjection.from(current.events);
     const rehydrated: RehydratedFts5Candidate[] = [];
     const seen = new Set<string>();
 
-    for (const candidate of candidates) {
-      const identity = `${candidate.kind}\u0000${candidate.canonicalId}`;
-      if (seen.has(identity)) throw new Error(`duplicate FTS candidate: ${candidate.kind}/${candidate.canonicalId}`);
-      seen.add(identity);
+    for (const candidate of candidateSnapshot) {
+      if (candidate.kind !== 'evidence' && candidate.kind !== 'claim') {
+        throw new Error(`FTS candidate has an unknown kind: ${String(candidate.kind)}`);
+      }
       if (
-        candidate.canonicalFingerprint !== watermark.canonicalFingerprint ||
-        candidate.generation !== watermark.generation
+        typeof candidate.canonicalId !== 'string' ||
+        candidate.canonicalId.trim().length === 0 ||
+        typeof candidate.scope !== 'string' ||
+        candidate.scope.trim().length === 0 ||
+        !Number.isInteger(candidate.generation) ||
+        candidate.generation <= 0 ||
+        !Number.isInteger(candidate.rank) ||
+        candidate.rank <= 0 ||
+        typeof candidate.score !== 'number' ||
+        !Number.isFinite(candidate.score) ||
+        !SHA256_PATTERN.test(candidate.entryDigest) ||
+        !SHA256_PATTERN.test(candidate.canonicalFingerprint)
       ) {
+        throw new Error('FTS candidate metadata is malformed');
+      }
+      const identity = `${candidate.kind}\u0000${candidate.canonicalId}`;
+      if (seen.has(identity)) {
+        throw new Error(`duplicate FTS candidate: ${candidate.kind}/${candidate.canonicalId}`);
+      }
+      seen.add(identity);
+      if (candidate.canonicalFingerprint !== current.fingerprint) {
         throw new Error(`FTS candidate ${candidate.canonicalId} belongs to a stale projection`);
       }
       if (!allowedScopes.has(candidate.scope)) {
@@ -509,13 +687,18 @@ export class SqliteFts5Projection {
       }
 
       if (candidate.kind === 'evidence') {
+        if (candidate.lifecycle !== undefined) {
+          throw new Error(`FTS evidence candidate has an invalid lifecycle: ${candidate.canonicalId}`);
+        }
         const projected = evidence.get(candidate.canonicalId);
         if (
           projected === undefined ||
           !searchableEvidence(projected.record, evidence, this.#allowedSensitivities) ||
           projected.record.scope !== candidate.scope
         ) {
-          throw new Error(`FTS evidence candidate is no longer canonically searchable: ${candidate.canonicalId}`);
+          throw new Error(
+            `FTS evidence candidate is no longer canonically searchable: ${candidate.canonicalId}`,
+          );
         }
         const base = Object.freeze({
           canonicalId: projected.record.id,
@@ -543,9 +726,11 @@ export class SqliteFts5Projection {
         claim === undefined ||
         !searchableClaim(claim, lifecycle, evidence, this.#allowedSensitivities) ||
         claim.key.scope !== candidate.scope ||
-        (view === 'current' && lifecycle !== 'active')
+        (claimLifecycle === 'active-only' && lifecycle !== 'active')
       ) {
-        throw new Error(`FTS claim candidate is no longer canonically searchable: ${candidate.canonicalId}`);
+        throw new Error(
+          `FTS claim candidate is no longer canonically searchable: ${candidate.canonicalId}`,
+        );
       }
       const base = Object.freeze({
         canonicalId: claim.id,
@@ -553,7 +738,7 @@ export class SqliteFts5Projection {
         scope: claim.key.scope,
         lifecycle,
         sourceDigest: contentDigest(claim),
-        searchText: claimText(claim),
+        searchText: claimText(claim, this.#indexClaimValues),
       });
       if (documentDigest(base) !== candidate.entryDigest || candidate.lifecycle !== lifecycle) {
         throw new Error(`FTS claim candidate digest mismatch: ${candidate.canonicalId}`);

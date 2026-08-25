@@ -8,13 +8,17 @@ The FTS5 layer accelerates lexical candidate discovery without becoming a second
 canonical ledger
       ↓ deterministic projection
 SQLite FTS5 cache
-      ↓ candidate ids + digests only
+      ↓ candidate addresses only
 canonical rehydration
-      ↓ authorization / state adjudication
+      ↓ availability / lifecycle / scope / privacy checks
+state adjudication
+      ↓
 bounded model context
 ```
 
 The index is disposable. It never authorizes a fact, procedure, outcome, or instruction.
+
+A lexical miss is not proof that a memory is absent. FTS is one candidate generator; exhaustive or safety-critical absence claims require an explicit canonical coverage protocol or additional retrievers.
 
 ## Trust boundary
 
@@ -24,15 +28,31 @@ A search hit is only an address:
 canonical id
 kind
 scope
-rank
+transaction lifecycle
+rank and advisory score
 projection generation
 entry digest
 canonical fingerprint
 ```
 
-It exposes neither indexed text nor claim values. Before a hit may influence a model or action, `rehydrate` verifies the active generation, exact ledger fingerprint, authorized scope, evidence availability, claim lifecycle, privacy policy, and canonical entry digest.
+It exposes neither indexed text nor claim values. Before a hit may influence a model or action, `rehydrate` checks the exact canonical fingerprint, authorized scope, evidence availability, claim lifecycle, plaintext privacy policy, and a freshly recomputed entry digest.
 
-## Watermark, manifest, and generations
+Rank and score describe the cache query that produced a candidate. They are not epistemic authority and must not bypass canonical state adjudication.
+
+## Canonical single-read snapshots
+
+Every public operation first semantically replays the supplied events through `MemoryKernel.from(events)` and then uses that one immutable event snapshot for:
+
+```text
+fingerprinting
+projection document construction
+privacy filtering
+rehydration
+```
+
+Caller-owned objects and stateful getters therefore cannot present one history to fingerprinting and another history to indexing.
+
+## Watermark, configuration, manifest, and generations
 
 Every rebuild stores:
 
@@ -44,55 +64,113 @@ event count
 last event sequence
 entry count
 full generation manifest digest
+projection configuration digest
 rebuild time
 ```
 
-`status` replays the canonical input and verifies every active row plus the complete manifest. Deleted, inserted, malformed, or modified cache rows therefore fail closed instead of silently changing recall.
+The configuration digest binds the generation to:
 
-This is integrity detection, not authentication. An attacker able to rewrite both the projection and all of its metadata remains outside this cache-level boundary; canonical rehydration and a rebuild are still required.
+```text
+projection schema
+tokenizer
+allowed plaintext sensitivity levels
+claim-value indexing policy
+```
+
+A generation built under a permissive policy cannot be silently reopened under a stricter host policy. It becomes stale and must be rebuilt.
+
+`status` verifies every active row and the complete generation manifest. Deleted, inserted, malformed, duplicated, or modified cache rows therefore fail closed instead of silently changing recall.
+
+This is integrity detection, not authentication. An operator able to rewrite both projection rows and all cache metadata remains outside this cache-level boundary. Canonical rehydration is still mandatory.
+
+## Atomic rebuild and fork resistance
 
 Rebuild uses a generation swap inside `BEGIN IMMEDIATE`:
 
 1. acquire the SQLite write lock;
 2. read the current watermark under that lock;
-3. reject an older snapshot or same-length canonical fork;
-4. insert the next generation;
-5. write its watermark and manifest;
-6. retire prior generations;
-7. commit.
+3. reject a regressing history;
+4. verify that a longer history extends the exact previously projected prefix;
+5. reject same-length or longer canonical forks;
+6. insert the next generation;
+7. write its watermark, configuration digest, and manifest;
+8. retire prior generations;
+9. commit.
 
-A failure at any phase rolls the transaction back, leaving the prior generation usable. Reading the watermark after acquiring the write lock prevents concurrent rebuilders from independently choosing the same generation or regressing a newer committed snapshot.
+A failure at any injected phase rolls the transaction back, leaving the prior generation usable. Reading and validating the watermark after acquiring the write lock prevents delayed rebuilders from regressing a newer committed projection.
+
+## Consistent search snapshots
+
+A strict search performs, in one SQLite read transaction:
+
+```text
+read watermark
+    ↓
+validate configuration
+    ↓
+verify active-generation row manifest
+    ↓
+execute MATCH against that same generation
+```
+
+A concurrent rebuild cannot retire the generation between validation and `MATCH` and cause a false empty result.
 
 ## Plaintext privacy policy
 
-By default, searchable text enters the cache only when every contributing evidence object is currently available and classified `public` or `internal`.
+By default, searchable evidence text enters the cache only when the source is currently available and classified `public` or `internal`.
 
-The following remain excluded regardless of a mistaken lower sensitivity classification:
+The following remain excluded:
 
 ```text
 secret-detected evidence
-claims derived from secret-detected evidence
-evidence-less claim values with no privacy classification
+claims derived from excluded or unavailable evidence
+evidence-less claims with no privacy classification
 personal / sensitive / secret evidence under the default policy
 ```
 
-A host may broaden the configured sensitivity list only when encryption, tenancy, access control, deletion, backups, and incident recovery justify copying that data into a search cache.
+Claim values have no independent sensitivity field yet and are omitted by default. A host must explicitly set:
 
-## Query and scope bounds
+```ts
+indexClaimValues: true
+```
 
-Callers never supply raw SQLite `MATCH` syntax. Input is normalized into bounded Unicode word/identifier tokens and compiled into quoted prefix terms. The public path bounds:
+before values are copied into plaintext FTS. The option is runtime-validated as a boolean and is included in the configuration digest.
 
+Claim subject, predicate, and tags remain metadata indexed only when every cited source is currently available and permitted by the configured sensitivity policy. A later claim-level privacy classification remains desirable.
+
+A host should broaden plaintext sensitivity levels only when tenancy, filesystem permissions, encryption, deletion, backup handling, and incident response justify the extra copy.
+
+## Query, scope, and candidate bounds
+
+Callers never supply raw SQLite `MATCH` syntax. Input is normalized with deterministic Unicode normalization and lowercasing, tokenized into word/number/identifier terms, and compiled into quoted prefix expressions.
+
+The public path bounds:
+
+- query characters;
 - query token count;
 - individual token length;
 - result count;
+- rehydration candidate count;
 - number of authorized scopes;
 - scope identifier length.
 
 `global` is never appended implicitly. FTS operators, column filters, and `NEAR` expressions cannot be injected through the query string.
 
-## Candidate-only output
+## Lifecycle is not world-time truth
 
-Search returns IDs, scope, lifecycle, score, generation, fingerprint, and entry digest. It deliberately omits:
+The projection includes both `active` and `superseded` claim candidates by default. An optional:
+
+```ts
+claimLifecycle: 'active-only'
+```
+
+filter narrows the transaction-lifecycle candidate set, but it is not a current-state decision.
+
+Bitemporal current/historical validity, conflicts, invalidation, and `unknown-current` remain the state adjudicator's responsibility.
+
+## Candidate-only output and canonical rehydration
+
+Search deliberately omits:
 
 ```text
 search_text
@@ -101,7 +179,16 @@ evidence preview
 model-ready content
 ```
 
-The caller must rehydrate from canonical projections. Current search excludes superseded claims; historical search may recover them but still preserves their lifecycle.
+Rehydration uses canonical projections rather than the cache. A candidate can therefore still be rehydrated after the disposable database has been closed or rebuilt, provided that:
+
+```text
+candidate canonical fingerprint == current canonical fingerprint
+candidate scope is authorized
+canonical object remains searchable under host privacy policy
+fresh canonical entry digest == candidate entry digest
+```
+
+Candidates from an older canonical history fail closed.
 
 ## Recovery
 
@@ -118,12 +205,15 @@ rebuild
 V1 does not yet provide:
 
 - incremental indexing; it performs full canonical rebuilds;
-- a cached/opaque durable-ledger snapshot, so freshness checks currently replay the supplied history;
+- bounded freshness verification; strict status/search currently scan the active generation;
+- an authenticated or keyed manifest;
+- proof of completeness for the internal FTS shadow index;
 - encrypted per-user personal-memory indexes;
+- claim-level sensitivity independent of source evidence;
 - BM25 calibration across heterogeneous document classes;
 - typo tolerance, stemming, synonyms, or learned query rewriting;
-- vector, temporal, graph, or causal candidate fusion;
+- vector, temporal, graph, causal, or learned candidate fusion;
 - distributed replicas, leases, or million-object benchmark evidence;
-- protection against an operator who can forge both cache rows and cache metadata.
+- proof that a zero-result lexical query means no relevant memory exists.
 
 These are later retrieval gates. None weaken the invariant that index output must be canonically rehydrated and authorized.

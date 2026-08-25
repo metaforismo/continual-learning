@@ -9,13 +9,20 @@ import type {
   MemoryEvent,
 } from '../domain.js';
 import { EvidenceProjection } from '../evidence.js';
-import type { Fts5ProjectionDocumentKind, Fts5ProjectionView } from './types.js';
+import {
+  FTS5_PROJECTION_SCHEMA_VERSION,
+  type Fts5ClaimLifecycleFilter,
+  type Fts5ProjectionDocumentKind,
+} from './types.js';
 
 export const SHA256_PATTERN = /^sha256:[0-9a-f]{64}$/;
 export const DEFAULT_MAX_QUERY_TOKENS = 16;
 export const MAX_QUERY_TOKEN_LENGTH = 96;
+export const MAX_QUERY_CHARACTERS = 4_096;
 export const MAX_SCOPE_COUNT = 64;
 export const MAX_SCOPE_LENGTH = 256;
+
+const FTS5_TOKENIZER = 'unicode61 remove_diacritics 2';
 
 export interface IndexedDocument {
   readonly canonicalId: string;
@@ -44,9 +51,11 @@ export function canonicalJson(
   if (Array.isArray(value)) {
     if (ancestors.has(value)) throw new TypeError(`${path} cannot contain a circular reference`);
     ancestors.add(value);
-    const encoded = value.map((item, index) =>
-      canonicalJson(item, `${path}[${index}]`, ancestors),
-    );
+    const encoded: string[] = [];
+    for (let index = 0; index < value.length; index += 1) {
+      if (!(index in value)) throw new TypeError(`${path} cannot contain a sparse array`);
+      encoded.push(canonicalJson(value[index], `${path}[${index}]`, ancestors));
+    }
     ancestors.delete(value);
     return `[${encoded.join(',')}]`;
   }
@@ -75,36 +84,48 @@ export function contentDigest(value: unknown): string {
   return `sha256:${createHash('sha256').update(canonicalJson(value)).digest('hex')}`;
 }
 
-export function normalizeView(value: Fts5ProjectionView | undefined): Fts5ProjectionView {
-  const view = value ?? 'current';
-  if (view !== 'current' && view !== 'historical') {
-    throw new Error('FTS projection view must be current or historical');
+export function normalizeClaimLifecycleFilter(
+  value: Fts5ClaimLifecycleFilter | undefined,
+): Fts5ClaimLifecycleFilter {
+  const filter = value ?? 'all';
+  if (filter !== 'all' && filter !== 'active-only') {
+    throw new Error('FTS claimLifecycle must be all or active-only');
   }
-  return view;
+  return filter;
 }
 
-export function assertScopeChain(scopeChain: readonly string[]): void {
-  if (scopeChain.length === 0) throw new Error('scopeChain requires at least one value');
-  if (scopeChain.length > MAX_SCOPE_COUNT) {
+export function snapshotScopeChain(scopeChain: readonly string[]): readonly string[] {
+  if (!Array.isArray(scopeChain)) throw new TypeError('scopeChain must be an array');
+  const snapshot = Object.freeze(Array.from(scopeChain));
+  if (snapshot.length === 0) throw new Error('scopeChain requires at least one value');
+  if (snapshot.length > MAX_SCOPE_COUNT) {
     throw new RangeError(`scopeChain cannot exceed ${MAX_SCOPE_COUNT} values`);
   }
-  if (scopeChain.some((scope) => scope.trim().length === 0)) {
+  if (snapshot.some((scope) => typeof scope !== 'string')) {
+    throw new TypeError('scopeChain values must be strings');
+  }
+  if (snapshot.some((scope) => scope.trim().length === 0)) {
     throw new Error('scopeChain cannot contain empty values');
   }
-  if (scopeChain.some((scope) => scope.length > MAX_SCOPE_LENGTH)) {
+  if (snapshot.some((scope) => scope.length > MAX_SCOPE_LENGTH)) {
     throw new RangeError(`scopeChain values cannot exceed ${MAX_SCOPE_LENGTH} characters`);
   }
-  if (new Set(scopeChain).size !== scopeChain.length) {
+  if (new Set(snapshot).size !== snapshot.length) {
     throw new Error('scopeChain cannot contain duplicates');
   }
+  return snapshot;
 }
 
 export function safeMatchQuery(query: string, maxTokens = DEFAULT_MAX_QUERY_TOKENS): string {
+  if (typeof query !== 'string') throw new TypeError('FTS query must be a string');
+  if (query.length > MAX_QUERY_CHARACTERS) {
+    throw new RangeError(`FTS query cannot exceed ${MAX_QUERY_CHARACTERS} characters`);
+  }
   if (!Number.isInteger(maxTokens) || maxTokens <= 0 || maxTokens > 64) {
     throw new RangeError('maxQueryTokens must be an integer in [1, 64]');
   }
   const tokens = [
-    ...new Set(query.normalize('NFKC').toLocaleLowerCase().match(/[\p{L}\p{N}_-]+/gu) ?? []),
+    ...new Set(query.normalize('NFKC').toLowerCase().match(/[\p{L}\p{N}_-]+/gu) ?? []),
   ];
   if (tokens.length === 0) throw new Error('FTS query requires at least one searchable token');
   if (tokens.length > maxTokens) {
@@ -123,12 +144,12 @@ export function evidenceText(record: EvidenceRecord): string {
     .join('\n');
 }
 
-export function claimText(claim: ClaimRecord): string {
+export function claimText(claim: ClaimRecord, includeValue = false): string {
   return [
     claim.key.subject,
     claim.key.predicate,
     ...claim.tags,
-    canonicalJson(claim.value as JsonValue),
+    ...(includeValue ? [canonicalJson(claim.value as JsonValue)] : []),
   ].join('\n');
 }
 
@@ -148,6 +169,18 @@ export function manifestDigest(documents: readonly IndexedDocument[]): string {
       entryDigest: document.entryDigest,
     })),
   );
+}
+
+export function projectionConfigDigest(
+  sensitivities: readonly EvidenceRecord['sensitivity'][],
+  indexClaimValues: boolean,
+): string {
+  return contentDigest({
+    schemaVersion: FTS5_PROJECTION_SCHEMA_VERSION,
+    tokenizer: FTS5_TOKENIZER,
+    searchableSensitivities: [...sensitivities].sort(),
+    indexClaimValues,
+  });
 }
 
 export function searchableEvidence(
@@ -187,6 +220,7 @@ export function searchableClaim(
 export function buildDocuments(
   events: readonly MemoryEvent[],
   allowedSensitivities: ReadonlySet<EvidenceRecord['sensitivity']>,
+  includeClaimValues = false,
 ): readonly IndexedDocument[] {
   const evidence = EvidenceProjection.from(events);
   const claims = ClaimProjection.from(events);
@@ -220,7 +254,7 @@ export function buildDocuments(
       scope: claim.key.scope,
       lifecycle,
       sourceDigest: contentDigest(claim),
-      searchText: claimText(claim),
+      searchText: claimText(claim, includeClaimValues),
     });
     documents.push(Object.freeze({ ...base, entryDigest: documentDigest(base) }));
   }

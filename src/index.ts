@@ -9,3 +9,4 @@ export * from './ledger.js';
 export * from './procedures.js';
 export * from './state/index.js';
 export * from './transitions/index.js';
+export * from './retrieval/index.js';

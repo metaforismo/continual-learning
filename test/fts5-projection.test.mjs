@@ -26,7 +26,7 @@ test('FTS returns canonical addresses only and requires explicit rehydration', (
     const watermark = projection.rebuild(kernel.events(), 10);
     assert.equal(watermark.eventCount, 2);
 
-    const candidates = projection.search(kernel.events(), 'zed editor', {
+    const candidates = projection.search(kernel.events(), 'editor preference', {
       scopeChain: ['project/search'],
     });
     assert.ok(candidates.length >= 1);
@@ -245,7 +245,7 @@ test('safe query compilation treats MATCH operators as ordinary tokens and bound
   }
 });
 
-test('historical search can recall superseded claims while current search cannot', () => {
+test('FTS preserves superseded lifecycle and only filters it on explicit active-only request', () => {
   const files = fixture();
   try {
     const kernel = new MemoryKernel();
@@ -272,19 +272,19 @@ test('historical search can recall superseded claims while current search cannot
 
     const projection = SqliteFts5Projection.open(files.filename);
     projection.rebuild(kernel.events(), 8);
-    const current = projection.search(kernel.events(), 'vim preference', {
+    const current = projection.search(kernel.events(), 'editor preference', {
       scopeChain: ['project/search'],
-      view: 'current',
+      claimLifecycle: 'active-only',
     });
     assert.equal(current.some((item) => item.canonicalId === oldClaim.id), false);
-    const historical = projection.search(kernel.events(), 'vim preference', {
+    const historical = projection.search(kernel.events(), 'editor preference', {
       scopeChain: ['project/search'],
-      view: 'historical',
+      claimLifecycle: 'all',
     });
     assert.equal(historical.some((item) => item.canonicalId === oldClaim.id), true);
     const hydrated = projection.rehydrate(kernel.events(), historical, {
       scopeChain: ['project/search'],
-      view: 'historical',
+      claimLifecycle: 'all',
     });
     assert.equal(
       hydrated.find((item) => item.candidate.canonicalId === oldClaim.id)?.lifecycle,

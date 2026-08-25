@@ -3,7 +3,7 @@ import type { ClaimLifecycle, ClaimRecord, EvidenceRecord, MemoryEvent } from '.
 export const FTS5_PROJECTION_SCHEMA_VERSION = 1 as const;
 
 export type Fts5ProjectionDocumentKind = 'evidence' | 'claim';
-export type Fts5ProjectionView = 'current' | 'historical';
+export type Fts5ClaimLifecycleFilter = 'all' | 'active-only';
 
 export interface Fts5ProjectionWatermark {
   readonly schemaVersion: typeof FTS5_PROJECTION_SCHEMA_VERSION;
@@ -13,6 +13,7 @@ export interface Fts5ProjectionWatermark {
   readonly canonicalFingerprint: string;
   readonly entryCount: number;
   readonly manifestDigest: string;
+  readonly configDigest: string;
   readonly rebuiltAt: number;
 }
 
@@ -28,7 +29,8 @@ export interface Fts5ProjectionStatus {
 export interface Fts5SearchOptions {
   /** Explicit authorized scopes. `global` is never added implicitly. */
   readonly scopeChain: readonly string[];
-  readonly view?: Fts5ProjectionView;
+  /** Transaction-lifecycle candidate filter only; it does not adjudicate world-time truth. */
+  readonly claimLifecycle?: Fts5ClaimLifecycleFilter;
   readonly limit?: number;
   readonly maxQueryTokens?: number;
 }
@@ -66,7 +68,8 @@ export type RehydratedFts5Candidate =
 
 export interface Fts5RehydrateOptions {
   readonly scopeChain: readonly string[];
-  readonly view?: Fts5ProjectionView;
+  /** Transaction-lifecycle candidate filter only; it does not adjudicate world-time truth. */
+  readonly claimLifecycle?: Fts5ClaimLifecycleFilter;
 }
 
 export type Fts5RebuildPhase =
@@ -83,6 +86,11 @@ export interface Fts5ProjectionOptions {
    * and internal. `secret-detected` taint remains excluded regardless of this list.
    */
   readonly searchableSensitivities?: readonly EvidenceRecord['sensitivity'][];
+  /**
+   * Claim values have no independent sensitivity field yet. They are therefore omitted from the
+   * plaintext index by default even when their supporting evidence is searchable.
+   */
+  readonly indexClaimValues?: boolean;
   readonly busyTimeoutMs?: number;
   /** Test-only deterministic failure injection for transaction rollback verification. */
   readonly faultInjector?: (phase: Fts5RebuildPhase) => void;

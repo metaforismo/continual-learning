@@ -5,7 +5,7 @@
   "description": "A model-agnostic continual-learning memory kernel for long-running agents.",
   "type": "module",
   "engines": {
-    "node": ">=22.0.0"
+    "node": ">=22.16.0"
   },
   "scripts": {
     "clean": "rm -rf dist",
