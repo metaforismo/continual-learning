@@ -1,0 +1,235 @@
+name: Adversarially harden durable ledger
+
+on:
+  push:
+    branches:
+      - feat/durable-canonical-ledger-v1
+
+permissions:
+  contents: write
+  pull-requests: write
+
+concurrency:
+  group: bootstrap-durable-ledger
+  cancel-in-progress: false
+
+jobs:
+  review:
+    runs-on: ubuntu-24.04
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: feat/durable-canonical-ledger-v1
+          fetch-depth: 0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22.23.2
+      - name: Apply storage-boundary hardening
+        shell: bash
+        run: |
+          git fetch origin main feat/durable-canonical-ledger-v1
+          git reset --hard origin/feat/durable-canonical-ledger-v1
+          test ! -f .github/workflows/bootstrap-durable-ledger.yml
+          python <<'PY'
+          from pathlib import Path
+
+          path = Path('src/storage/sqlite-ledger.ts')
+          text = path.read_text()
+
+          old = """  if (!Number.isFinite(envelope.recordedAt)) {
+              throw new Error('receipt recordedAt must be finite');
+            }
+"""
+          new = """  if (!Number.isSafeInteger(envelope.recordedAt) || envelope.recordedAt < 0) {
+              throw new Error('receipt recordedAt must be a non-negative safe integer');
+            }
+"""
+          if old not in text:
+              raise SystemExit('missing envelope time validation')
+          text = text.replace(old, new, 1)
+
+          marker = """      CREATE TABLE IF NOT EXISTS cl_transition_receipts (
+                seq INTEGER PRIMARY KEY,
+                id TEXT NOT NULL UNIQUE,
+                result_digest TEXT NOT NULL UNIQUE,
+                record_json TEXT NOT NULL,
+                record_digest TEXT NOT NULL,
+                previous_receipt_digest TEXT NOT NULL,
+                receipt_digest TEXT NOT NULL UNIQUE
+              ) STRICT;
+"""
+          triggers = marker + """
+
+              CREATE TRIGGER IF NOT EXISTS cl_ledger_events_no_update
+              BEFORE UPDATE ON cl_ledger_events
+              BEGIN
+                SELECT RAISE(ABORT, 'canonical event rows are append-only');
+              END;
+
+              CREATE TRIGGER IF NOT EXISTS cl_ledger_events_no_delete
+              BEFORE DELETE ON cl_ledger_events
+              BEGIN
+                SELECT RAISE(ABORT, 'canonical event rows are append-only');
+              END;
+
+              CREATE TRIGGER IF NOT EXISTS cl_transition_receipts_no_update
+              BEFORE UPDATE ON cl_transition_receipts
+              BEGIN
+                SELECT RAISE(ABORT, 'transition receipt rows are append-only');
+              END;
+
+              CREATE TRIGGER IF NOT EXISTS cl_transition_receipts_no_delete
+              BEFORE DELETE ON cl_transition_receipts
+              BEGIN
+                SELECT RAISE(ABORT, 'transition receipt rows are append-only');
+              END;
+"""
+          if marker not in text:
+              raise SystemExit('missing receipt schema block')
+          text = text.replace(marker, triggers, 1)
+
+          old = """    validateEnvelope(envelope);
+            validateAcceptedResult(result);
+
+            return this.#withImmediateTransaction(() => {
+              const meta = this.#meta();
+              const duplicate = this.#receiptByResultDigest(result.resultDigest, meta);
+"""
+          new = """    const resultSnapshot = canonicalJson(result);
+            const verifiedResult = JSON.parse(resultSnapshot) as TransitionVerificationResult;
+            const envelopeSnapshot = JSON.parse(canonicalJson(envelope)) as DurableReceiptEnvelope;
+            validateEnvelope(envelopeSnapshot);
+            validateAcceptedResult(verifiedResult);
+
+            return this.#withImmediateTransaction(() => {
+              const meta = this.#meta();
+              const currentEvents = this.#eventsForMeta(meta);
+              const existingReceipts = this.#receiptsForMeta(meta);
+              const duplicate = existingReceipts.find(
+                (receipt) => receipt.audit.resultDigest === verifiedResult.resultDigest,
+              );
+"""
+          if old not in text:
+              raise SystemExit('missing durable commit prelude')
+          text = text.replace(old, new, 1)
+
+          start = text.index('  commitVerifiedTransition(')
+          end = text.index('\n  close(): void {', start)
+          prefix, method, suffix = text[:start], text[start:end], text[end:]
+          method = method.replace('result.', 'verifiedResult.')
+          method = method.replace('committer(currentKernel, verifiedResult)', 'committer(currentKernel, result)')
+          method = method.replace('auditRecordFor(verifiedResult, envelope,', 'auditRecordFor(verifiedResult, envelopeSnapshot,')
+          duplicate_current = """      const currentEvents = this.#eventsForMeta(meta);
+              if (meta.canonical_fingerprint !== verifiedResult.baseFingerprint) {
+"""
+          replacement_current = """      if (meta.canonical_fingerprint !== verifiedResult.baseFingerprint) {
+"""
+          if duplicate_current not in method:
+              raise SystemExit('missing duplicate currentEvents declaration')
+          method = method.replace(duplicate_current, replacement_current, 1)
+          callback = """      const committedKernel = committer(currentKernel, result);
+              if (!(committedKernel instanceof MemoryKernel)) {
+"""
+          callback_new = """      const committedKernel = committer(currentKernel, result);
+              if (canonicalJson(result) !== resultSnapshot) {
+                throw new Error('transition result changed while its commit capability was consumed');
+              }
+              if (!(committedKernel instanceof MemoryKernel)) {
+"""
+          if callback not in method:
+              raise SystemExit('missing capability callback block')
+          method = method.replace(callback, callback_new, 1)
+
+          time_marker = """      this.#faultInjector?.('after-event-inserts');
+
+              const audit = auditRecordFor(verifiedResult, envelopeSnapshot, meta.receipt_count + 1);
+"""
+          time_new = """      this.#faultInjector?.('after-event-inserts');
+
+              const previousReceiptTime = existingReceipts.at(-1)?.audit.recordedAt;
+              if (
+                (previousReceiptTime !== undefined && envelopeSnapshot.recordedAt < previousReceiptTime) ||
+                (lastRecordedAt !== undefined && envelopeSnapshot.recordedAt < lastRecordedAt)
+              ) {
+                throw new Error('transition receipt time cannot predate canonical or audit transaction time');
+              }
+              const audit = auditRecordFor(verifiedResult, envelopeSnapshot, meta.receipt_count + 1);
+"""
+          if time_marker not in method:
+              raise SystemExit('missing audit time insertion point')
+          method = method.replace(time_marker, time_new, 1)
+
+          event_time = """        if (lastRecordedAt !== undefined && event.recordedAt < lastRecordedAt) {
+                  throw new Error(`staged append recordedAt regresses at event ${event.id}`);
+                }
+"""
+          event_time_new = """        if (!Number.isSafeInteger(event.recordedAt) || event.recordedAt < 0) {
+                  throw new Error(`staged append recordedAt must be a non-negative safe integer at event ${event.id}`);
+                }
+                if (lastRecordedAt !== undefined && event.recordedAt < lastRecordedAt) {
+                  throw new Error(`staged append recordedAt regresses at event ${event.id}`);
+                }
+"""
+          if event_time not in method:
+              raise SystemExit('missing event time validation')
+          method = method.replace(event_time, event_time_new, 1)
+
+          text = prefix + method + suffix
+          path.write_text(text)
+
+          test_path = Path('test/sqlite-canonical-ledger.test.mjs')
+          tests = test_path.read_text()
+          tests = tests.replace(
+              """    raw.prepare(\"UPDATE cl_ledger_events SET actor = 'forged-actor' WHERE seq = 1\").run();
+                raw.close();
+                assert.throws(() => new SqliteCanonicalLedger(path), /columns do not match|integrity failed/);
+""",
+              """    assert.throws(
+                  () => raw.prepare(\"UPDATE cl_ledger_events SET actor = 'forged-actor' WHERE seq = 1\").run(),
+                  /canonical event rows are append-only/,
+                );
+                raw.exec('DROP TRIGGER cl_ledger_events_no_update');
+                raw.prepare(\"UPDATE cl_ledger_events SET actor = 'forged-actor' WHERE seq = 1\").run();
+                raw.close();
+                assert.throws(() => new SqliteCanonicalLedger(path), /columns do not match|integrity failed/);
+""",
+              1,
+          )
+          tests = tests.replace(
+              """    raw.prepare('DELETE FROM cl_transition_receipts WHERE seq = 1').run();
+                raw.close();
+                assert.throws(() => new SqliteCanonicalLedger(path), /receipt row count|integrity failed/);
+""",
+              """    assert.throws(
+                  () => raw.prepare('DELETE FROM cl_transition_receipts WHERE seq = 1').run(),
+                  /transition receipt rows are append-only/,
+                );
+                raw.exec('DROP TRIGGER cl_transition_receipts_no_delete');
+                raw.prepare('DELETE FROM cl_transition_receipts WHERE seq = 1').run();
+                raw.close();
+                assert.throws(() => new SqliteCanonicalLedger(path), /receipt row count|integrity failed/);
+""",
+              1,
+          )
+          test_path.write_text(tests)
+          PY
+      - name: Verify hardened branch and publish it
+        run: |
+          npm ci --ignore-scripts --no-audit --no-fund
+          npm run check
+          git diff --check
+          rm -f .github/workflows/review-durable-ledger.yml
+          git config user.name metaforismo
+          git config user.email 39646696+metaforismo@users.noreply.github.com
+          git add -A
+          git commit -m "fix: harden durable ledger replay and audit boundaries"
+          git push origin HEAD:feat/durable-canonical-ledger-v1
+      - name: Refresh draft PR body
+        shell: bash
+        run: |
+          number="$(gh pr list --repo metaforismo/continual-learning --head feat/durable-canonical-ledger-v1 --state open --json number --jq '.[0].number // empty')"
+          if [ -n "$number" ]; then
+            gh pr comment "$number" --repo metaforismo/continual-learning --body 'Adversarial pass added append-only SQL triggers, canonical single-read transition snapshots, event/receipt time monotonicity, full integrity validation on idempotent retries, and official Node runtime types. CI is rerunning on the new exact head.'
+          fi
