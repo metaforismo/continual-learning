@@ -1,0 +1,299 @@
+name: Apply FTS5 snapshot and config binding
+
+on:
+  push:
+    branches:
+      - feat/fts5-projection-v1-final
+
+permissions:
+  contents: write
+
+jobs:
+  apply:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: feat/fts5-projection-v1-final
+          fetch-depth: 0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Apply final review fixes
+        shell: bash
+        run: |
+          python <<'PY'
+          from pathlib import Path
+
+          def replace_once(path: str, old: str, new: str) -> None:
+              p = Path(path)
+              text = p.read_text()
+              if old not in text:
+                  raise SystemExit(f'missing expected block in {path}: {old[:100]!r}')
+              p.write_text(text.replace(old, new, 1))
+
+          replace_once(
+              'src/retrieval/types.ts',
+              '  readonly manifestDigest: string;\n  readonly rebuiltAt: number;',
+              '  readonly manifestDigest: string;\n  readonly configDigest: string;\n  readonly rebuiltAt: number;',
+          )
+
+          p = Path('src/retrieval/canonical.ts')
+          text = p.read_text()
+          text = text.replace(
+              'export function assertScopeChain(scopeChain: readonly string[]): void {',
+              'export function snapshotScopeChain(scopeChain: readonly string[]): readonly string[] {',
+              1,
+          )
+          old = "  if (new Set(scopeChain).size !== scopeChain.length) {\n    throw new Error('scopeChain cannot contain duplicates');\n  }\n}"
+          new = "  if (new Set(scopeChain).size !== scopeChain.length) {\n    throw new Error('scopeChain cannot contain duplicates');\n  }\n  return Object.freeze([...scopeChain]);\n}"
+          if old not in text:
+              raise SystemExit('missing scope snapshot return block')
+          text = text.replace(old, new, 1)
+          marker = 'export function buildDocuments(\n  events: readonly MemoryEvent[],'
+          insert = "export function projectionConfigDigest(\n  sensitivities: readonly EvidenceRecord['sensitivity'][],\n  indexClaimValues: boolean,\n): string {\n  return contentDigest({\n    schemaVersion: 1,\n    tokenizer: 'unicode61 remove_diacritics 2',\n    searchableSensitivities: [...sensitivities].sort(),\n    indexClaimValues,\n  });\n}\n\n"
+          if marker not in text:
+              raise SystemExit('missing buildDocuments marker')
+          text = text.replace(marker, insert + marker, 1)
+          p.write_text(text)
+
+          p = Path('src/retrieval/fts5.ts')
+          text = p.read_text()
+          replacements = [
+              ("import { ClaimProjection } from '../claims.js';", "import { ClaimProjection } from '../claims.js';\nimport { MemoryKernel } from '../kernel.js';"),
+              ('  assertScopeChain,\n', '  projectionConfigDigest,\n  snapshotScopeChain,\n'),
+              ('  readonly manifest_digest: string;\n  readonly rebuilt_at: number;', '  readonly manifest_digest: string;\n  readonly config_digest: string;\n  readonly rebuilt_at: number;'),
+              (
+                  "function snapshot(events: readonly MemoryEvent[]): Fts5ProjectionSnapshot {\n  const canonicalEvents = Object.freeze([...events]);\n  return Object.freeze({\n    events: canonicalEvents,\n    fingerprint: fingerprintMemoryEvents(canonicalEvents),\n  });\n}",
+                  "function snapshot(events: readonly MemoryEvent[]): Fts5ProjectionSnapshot {\n  // Canonicalize exactly once. Fingerprinting, projection, and rehydration use the same immutable\n  // semantic replay rather than rereading caller-owned objects or stateful getters.\n  const canonicalEvents = MemoryKernel.from(events).events();\n  return Object.freeze({\n    events: canonicalEvents,\n    fingerprint: fingerprintMemoryEvents(canonicalEvents),\n  });\n}",
+              ),
+              ("    typeof row.manifest_digest !== 'string' ||\n    typeof row.rebuilt_at !== 'number' ||", "    typeof row.manifest_digest !== 'string' ||\n    typeof row.config_digest !== 'string' ||\n    typeof row.rebuilt_at !== 'number' ||"),
+              ("  if (!SHA256_PATTERN.test(row.manifest_digest)) {\n    throw new Error('FTS projection manifest digest is malformed');\n  }\n  return Object.freeze({", "  if (!SHA256_PATTERN.test(row.manifest_digest)) {\n    throw new Error('FTS projection manifest digest is malformed');\n  }\n  if (!SHA256_PATTERN.test(row.config_digest)) {\n    throw new Error('FTS projection config digest is malformed');\n  }\n  return Object.freeze({"),
+              ('    manifestDigest: row.manifest_digest,\n    rebuiltAt: row.rebuilt_at,', '    manifestDigest: row.manifest_digest,\n    configDigest: row.config_digest,\n    rebuiltAt: row.rebuilt_at,'),
+              ("  readonly #indexClaimValues: boolean;\n  readonly #faultInjector:", "  readonly #indexClaimValues: boolean;\n  readonly #configDigest: string;\n  readonly #faultInjector:"),
+              ("    const sensitivities = options.searchableSensitivities ?? ['public', 'internal'];\n    if (sensitivities.length === 0 || new Set(sensitivities).size !== sensitivities.length) {", "    const sensitivities = Object.freeze([\n      ...(options.searchableSensitivities ?? ['public', 'internal']),\n    ]);\n    if (sensitivities.length === 0 || new Set(sensitivities).size !== sensitivities.length) {"),
+              ("    this.#indexClaimValues = options.indexClaimValues ?? false;\n    this.#faultInjector = options.faultInjector;", "    this.#indexClaimValues = options.indexClaimValues ?? false;\n    this.#configDigest = projectionConfigDigest(sensitivities, this.#indexClaimValues);\n    this.#faultInjector = options.faultInjector;"),
+              ("    this.#db.exec(`PRAGMA busy_timeout = ${busyTimeoutMs}`);", "    this.#db.exec('PRAGMA trusted_schema = OFF');\n    this.#db.exec(`PRAGMA busy_timeout = ${busyTimeoutMs}`);"),
+              ('        entry_count INTEGER NOT NULL,\n        manifest_digest TEXT NOT NULL,\n        rebuilt_at INTEGER NOT NULL', '        entry_count INTEGER NOT NULL,\n        manifest_digest TEXT NOT NULL,\n        config_digest TEXT NOT NULL,\n        rebuilt_at INTEGER NOT NULL'),
+              ('                  canonical_fingerprint, entry_count, manifest_digest, rebuilt_at', '                  canonical_fingerprint, entry_count, manifest_digest, config_digest, rebuilt_at'),
+              ('    const watermarkFresh =\n      watermark.canonicalFingerprint === current.fingerprint &&', '    const watermarkFresh =\n      watermark.configDigest === this.#configDigest &&\n      watermark.canonicalFingerprint === current.fingerprint &&'),
+              ("        integrityFailure !== undefined\n          ? `projection integrity failed: ${integrityFailure}`\n          : fresh\n            ? 'projection watermark matches canonical memory'\n            : 'projection watermark is stale',", "        integrityFailure !== undefined\n          ? `projection integrity failed: ${integrityFailure}`\n          : watermark.configDigest !== this.#configDigest\n            ? 'projection configuration does not match the active host policy'\n            : fresh\n              ? 'projection watermark matches canonical memory'\n              : 'projection watermark is stale',"),
+              ('            canonical_fingerprint, entry_count, manifest_digest, rebuilt_at\n          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)', '            canonical_fingerprint, entry_count, manifest_digest, config_digest, rebuilt_at\n          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)'),
+              ('            entry_count = excluded.entry_count,\n            manifest_digest = excluded.manifest_digest,\n            rebuilt_at = excluded.rebuilt_at', '            entry_count = excluded.entry_count,\n            manifest_digest = excluded.manifest_digest,\n            config_digest = excluded.config_digest,\n            rebuilt_at = excluded.rebuilt_at'),
+              ('          documents.length,\n          nextManifestDigest,\n          rebuiltAt,', '          documents.length,\n          nextManifestDigest,\n          this.#configDigest,\n          rebuiltAt,'),
+          ]
+          for old, new in replacements:
+              if old not in text:
+                  raise SystemExit(f'missing fts5 block: {old[:120]!r}')
+              text = text.replace(old, new, 1)
+
+          # Snapshot scope inputs once.
+          text = text.replace(
+              '    assertScopeChain(options.scopeChain);\n    const view = normalizeView(options.view);',
+              '    const scopeChain = snapshotScopeChain(options.scopeChain);\n    const view = normalizeView(options.view);',
+              1,
+          )
+          text = text.replace(
+              "const scopePlaceholders = options.scopeChain.map(() => '?').join(', ');",
+              "const scopePlaceholders = scopeChain.map(() => '?').join(', ');",
+              1,
+          )
+          text = text.replace('...options.scopeChain,\n                  limit,', '...scopeChain,\n                  limit,', 1)
+
+          rehydrate_at = text.index('  rehydrate(')
+          prefix, suffix = text[:rehydrate_at], text[rehydrate_at:]
+          suffix = suffix.replace(
+              "    assertScopeChain(options.scopeChain);\n    if (!Array.isArray(candidates)) throw new TypeError('FTS candidates must be an array');",
+              "    const scopeChain = snapshotScopeChain(options.scopeChain);\n    if (!Array.isArray(candidates)) throw new TypeError('FTS candidates must be an array');",
+              1,
+          )
+          suffix = suffix.replace('const allowedScopes = new Set(options.scopeChain);', 'const allowedScopes = new Set(scopeChain);', 1)
+          suffix = suffix.replace('const evidence = EvidenceProjection.from(events);', 'const evidence = EvidenceProjection.from(current.events);', 1)
+          suffix = suffix.replace('const claims = ClaimProjection.from(events);', 'const claims = ClaimProjection.from(current.events);', 1)
+          suffix = suffix.replace(
+              '    const rehydrated: RehydratedFts5Candidate[] = [];\n    const seen = new Set<string>();\n\n    for (const candidate of candidates) {',
+              '    const candidateSnapshot = Object.freeze(\n      candidates.map((candidate) => Object.freeze({ ...candidate })),\n    );\n    const rehydrated: RehydratedFts5Candidate[] = [];\n    const seen = new Set<string>();\n\n    for (const candidate of candidateSnapshot) {',
+              1,
+          )
+          suffix = suffix.replace(
+              '        !Number.isInteger(candidate.rank) ||\n        candidate.rank <= 0 ||\n        !SHA256_PATTERN.test(candidate.entryDigest) ||',
+              "        !Number.isInteger(candidate.rank) ||\n        candidate.rank <= 0 ||\n        typeof candidate.score !== 'number' ||\n        !Number.isFinite(candidate.score) ||\n        !SHA256_PATTERN.test(candidate.entryDigest) ||",
+              1,
+          )
+          text = prefix + suffix
+
+          # Rebuild/ensureFresh share one canonical snapshot.
+          old = '  rebuild(events: readonly MemoryEvent[], rebuiltAt = Date.now()): Fts5ProjectionWatermark {\n    this.#assertOpen();'
+          new = '  #rebuildSnapshot(\n    current: Fts5ProjectionSnapshot,\n    rebuiltAt: number,\n  ): Fts5ProjectionWatermark {\n    this.#assertOpen();'
+          if old not in text:
+              raise SystemExit('missing rebuild signature')
+          text = text.replace(old, new, 1)
+          text = text.replace('    const current = snapshot(events);\n    const documents = buildDocuments(', '    const documents = buildDocuments(', 1)
+          old = '''  ensureFresh(events: readonly MemoryEvent[], rebuiltAt = Date.now()): Fts5ProjectionWatermark {
+            const state = this.status(events);
+            return state.fresh && state.watermark !== undefined
+              ? state.watermark
+              : this.rebuild(events, rebuiltAt);
+          }
+'''
+          new = '''  rebuild(events: readonly MemoryEvent[], rebuiltAt = Date.now()): Fts5ProjectionWatermark {
+            return this.#rebuildSnapshot(snapshot(events), rebuiltAt);
+          }
+
+          ensureFresh(events: readonly MemoryEvent[], rebuiltAt = Date.now()): Fts5ProjectionWatermark {
+            const current = snapshot(events);
+            const state = this.#withReadTransaction(() => this.#statusForSnapshot(current));
+            return state.fresh && state.watermark !== undefined
+              ? state.watermark
+              : this.#rebuildSnapshot(current, rebuiltAt);
+          }
+'''
+          if old not in text:
+              raise SystemExit('missing ensureFresh block')
+          text = text.replace(old, new, 1)
+          p.write_text(text)
+
+          p = Path('test/fts5-projection-adversarial.test.mjs')
+          p.write_text(p.read_text() + r'''
+
+          test('projection fingerprinting and indexing share one canonical single-read event snapshot', () => {
+            const files = fixture();
+            try {
+              const kernel = new MemoryKernel();
+              appendEvidence(kernel, evidence('single-read-source', { preview: 'canonical single-read phrase' }));
+              const events = structuredClone(kernel.events());
+              let reads = 0;
+              Object.defineProperty(events[0].data.evidence, 'preview', {
+                enumerable: true,
+                configurable: true,
+                get() {
+                  reads += 1;
+                  return reads === 1 ? 'canonical single-read phrase' : 'forged second-read phrase';
+                },
+              });
+              const projection = SqliteFts5Projection.open(files.filename);
+              projection.rebuild(events, 2);
+              assert.equal(reads, 1);
+              assert.equal(
+                projection.search(kernel.events(), 'canonical single-read', {
+                  scopeChain: ['project/search'],
+                })[0]?.canonicalId,
+                'single-read-source',
+              );
+              assert.equal(
+                projection.search(kernel.events(), 'forged second-read', {
+                  scopeChain: ['project/search'],
+                }).length,
+                0,
+              );
+              projection.close();
+            } finally {
+              files.cleanup();
+            }
+          });
+
+          test('a projection cannot be reused under a different privacy configuration', () => {
+            const files = fixture();
+            try {
+              const kernel = new MemoryKernel();
+              const source = evidence('config-source', { preview: 'generic config observation' });
+              appendEvidence(kernel, source, 1);
+              kernel.assertClaim(
+                { eventId: 'assert-config-value', recordedAt: 2, actor: 'writer' },
+                {
+                  id: 'config-value-claim',
+                  key: {
+                    scope: 'project/search',
+                    subject: 'project-search',
+                    predicate: 'preferred-editor',
+                  },
+                  value: 'config-private-value',
+                  valid: { from: 2 },
+                  authority: source.authority,
+                  epistemicStatus: 'observed',
+                  confidence: 1,
+                  evidence: [{
+                    sourceId: source.id,
+                    sourceGroups: source.sourceGroups,
+                    authority: source.authority,
+                    contentHash: source.artifact.digest,
+                    roles: ['supports'],
+                  }],
+                  derivedFrom: [],
+                  tags: ['editor'],
+                },
+                { authorizeImmediately: true },
+              );
+              const permissive = SqliteFts5Projection.open(files.filename, {
+                indexClaimValues: true,
+              });
+              permissive.rebuild(kernel.events(), 3);
+              assert.equal(
+                permissive.search(kernel.events(), 'config-private-value', {
+                  scopeChain: ['project/search'],
+                }).some((candidate) => candidate.canonicalId === 'config-value-claim'),
+                true,
+              );
+              permissive.close();
+              const restrictive = SqliteFts5Projection.open(files.filename);
+              const status = restrictive.status(kernel.events());
+              assert.equal(status.fresh, false);
+              assert.match(status.reason, /configuration does not match/);
+              assert.throws(
+                () => restrictive.search(kernel.events(), 'config-private-value', {
+                  scopeChain: ['project/search'],
+                }),
+                /projection is unavailable/,
+              );
+              restrictive.ensureFresh(kernel.events(), 4);
+              assert.equal(
+                restrictive.search(kernel.events(), 'config-private-value', {
+                  scopeChain: ['project/search'],
+                }).some((candidate) => candidate.canonicalId === 'config-value-claim'),
+                false,
+              );
+              restrictive.close();
+            } finally {
+              files.cleanup();
+            }
+          });
+          ''')
+
+          p = Path('docs/FTS5_PROJECTION.md')
+          text = p.read_text()
+          text = text.replace(
+              'The index is disposable. It never authorizes a fact, procedure, outcome, or instruction.\n',
+              'The index is disposable. It never authorizes a fact, procedure, outcome, or instruction.\n\nThe supplied event sequence is canonicalized through semantic replay exactly once per public operation. Fingerprinting, document construction, and rehydration use that immutable snapshot, preventing caller-owned mutation or stateful getters from presenting one history to the watermark and another to the index.\n',
+              1,
+          )
+          text = text.replace('full generation manifest digest\nrebuild time', 'full generation manifest digest\nprojection configuration digest\nrebuild time', 1)
+          text = text.replace(
+              '`status` replays the canonical input and verifies every active row plus the complete manifest. Deleted, inserted, malformed, or modified cache rows therefore fail closed instead of silently changing recall.\n',
+              '`status` replays the canonical input and verifies every active row plus the complete manifest. Deleted, inserted, malformed, or modified cache rows therefore fail closed instead of silently changing recall.\n\nThe configuration digest binds the generation to tokenizer settings, the allowed sensitivity set, and whether claim values were explicitly enabled. Reopening a permissive cache under a stricter policy marks it stale and requires a rebuild.\n',
+              1,
+          )
+          p.write_text(text)
+
+          p = Path('README.md')
+          lines = p.read_text().splitlines()
+          for index, line in enumerate(lines):
+              if line.startswith('The test suite currently exercises '):
+                  lines[index] = 'The test suite currently exercises 139 foundational, durability, transition, state-adjudication, and lexical-projection scenarios.'
+                  break
+          else:
+              raise SystemExit('missing README test count')
+          p.write_text('\n'.join(lines) + '\n')
+          PY
+      - name: Verify branch
+        run: |
+          npm ci --ignore-scripts --no-audit --no-fund
+          npm run check
+          git diff --check
+      - name: Commit final review
+        run: |
+          rm .github/workflows/apply-fts5-snapshot.yml
+          git config user.name metaforismo
+          git config user.email 39646696+metaforismo@users.noreply.github.com
+          git add -A
+          git commit -m "fix: bind FTS5 generations to canonical snapshots"
+          git push origin HEAD:feat/fts5-projection-v1-final
