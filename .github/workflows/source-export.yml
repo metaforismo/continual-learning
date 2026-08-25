@@ -1,0 +1,21 @@
+name: Source Export (temporary)
+
+on:
+  push:
+    branches:
+      - feat/durable-ledger-v1
+
+permissions:
+  contents: read
+
+jobs:
+  export:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/upload-artifact@v4
+        with:
+          name: durable-ledger-source
+          path: .
+          include-hidden-files: true
+          retention-days: 1
