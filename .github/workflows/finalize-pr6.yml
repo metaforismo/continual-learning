@@ -1,0 +1,42 @@
+name: Finalize PR6 runtime metadata
+
+on:
+  push:
+    branches:
+      - feat/fts5-projection-v1-final
+
+permissions:
+  contents: write
+
+concurrency:
+  group: finalize-pr6-runtime
+  cancel-in-progress: false
+
+jobs:
+  finalize:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: feat/fts5-projection-v1-final
+          fetch-depth: 0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22.23.2
+      - name: Refresh lockfile and verify exact branch
+        run: |
+          npm install --package-lock-only --ignore-scripts --no-audit --no-fund
+          npm ci --ignore-scripts --no-audit --no-fund
+          npm run check
+          git diff --check
+      - name: Publish final metadata-only fix
+        run: |
+          rm .github/workflows/finalize-pr6.yml
+          git config user.name metaforismo
+          git config user.email 39646696+metaforismo@users.noreply.github.com
+          git add package-lock.json package.json src/sqlite-ambient.d.ts .github/workflows/finalize-pr6.yml
+          if git diff --cached --quiet; then
+            exit 0
+          fi
+          git commit -m "fix: align FTS5 runtime metadata"
+          git push origin HEAD:feat/fts5-projection-v1-final
