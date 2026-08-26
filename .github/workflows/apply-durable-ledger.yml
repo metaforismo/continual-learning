@@ -1,0 +1,225 @@
+name: Apply and verify durable canonical ledger (temporary)
+
+on:
+  push:
+    branches:
+      - feat/durable-canonical-ledger-v1
+
+permissions:
+  contents: write
+  pull-requests: write
+
+concurrency:
+  group: durable-canonical-ledger-application
+  cancel-in-progress: true
+
+jobs:
+  apply:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: feat/durable-canonical-ledger-v1
+          fetch-depth: 0
+
+      - name: Install reviewed implementation and documentation wiring
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -f .tmp/canonical-ledger.ts
+          mv .tmp/canonical-ledger.ts src/durable/canonical-ledger.ts
+          rmdir .tmp
+
+          python <<'PY'
+          from pathlib import Path
+
+          implementation = Path('src/durable/canonical-ledger.ts')
+          text = implementation.read_text()
+
+          def replace_once(old: str, new: str) -> None:
+              global text
+              if old not in text:
+                  raise SystemExit(f'missing durable hardening block: {old[:120]!r}')
+              text = text.replace(old, new, 1)
+
+          replace_once(
+              '''interface NormalizedDurableCommitRequest {
+  readonly base: DurableCanonicalCursor;''',
+              '''interface NormalizedDurableCommitRequest {
+  /** Original process-local object identity; deliberately excluded from the request digest. */
+  readonly capabilityBase: DurableCanonicalCursor;
+  readonly base: DurableCanonicalCursor;''',
+          )
+          old_method_start = text.index('  #requestSnapshot(request: DurableCommitRequest): NormalizedDurableCommitRequest {')
+          old_method_end = text.index('\n  #validateRequest(', old_method_start)
+          new_method = '''  #requestSnapshot(request: DurableCommitRequest): NormalizedDurableCommitRequest {
+    if (typeof request !== 'object' || request === null) {
+      throw new TypeError('durable commit request has an invalid runtime shape');
+    }
+    // Read each potentially stateful property exactly once before validation or hashing.
+    const capabilityBase = request.base;
+    const idempotencyKey = request.idempotencyKey;
+    const committedBy = request.committedBy;
+    const suppliedEvents = request.events;
+    const suppliedTransition = request.transition;
+    const suppliedAudit = request.audit;
+    if (
+      typeof idempotencyKey !== 'string' ||
+      typeof committedBy !== 'string' ||
+      !Array.isArray(suppliedEvents) ||
+      typeof capabilityBase !== 'object' ||
+      capabilityBase === null ||
+      typeof suppliedTransition !== 'object' ||
+      suppliedTransition === null ||
+      typeof suppliedAudit !== 'object' ||
+      suppliedAudit === null
+    ) {
+      throw new TypeError('durable commit request has an invalid runtime shape');
+    }
+    const base = cloneJson(capabilityBase);
+    const events = cloneJson(suppliedEvents);
+    const transition = cloneJson(suppliedTransition);
+    const audit = cloneJson(suppliedAudit);
+    const payload = { base, idempotencyKey, committedBy, events, transition, audit };
+    const canonical = stableJson(payload);
+    if (canonical.length > this.#maxRequestCharacters) {
+      throw new RangeError('durable commit request exceeds the canonical size budget');
+    }
+    return Object.freeze({
+      capabilityBase,
+      ...payload,
+      requestDigest: contentDigest({ domain: 'cl-durable-request-v1', payload }),
+    });
+  }
+'''
+          text = text[:old_method_start] + new_method + text[old_method_end:]
+          replace_once(
+              '      this.#assertCursorCapability(request.base);',
+              '      this.#assertCursorCapability(snapshot.capabilityBase);',
+          )
+          implementation.write_text(text)
+
+          root = Path('src/index.ts')
+          root_text = root.read_text()
+          durable_export = "export * from './durable/index.js';\n"
+          if durable_export not in root_text:
+              root.write_text(root_text + durable_export)
+
+          readme = Path('README.md')
+          readme_text = readme.read_text()
+          docs_marker = '- [Transition verification](docs/TRANSITION_VERIFICATION.md)'
+          docs_line = '- [Durable canonical ledger](docs/DURABLE_CANONICAL_LEDGER.md)'
+          if docs_line not in readme_text:
+              if docs_marker in readme_text:
+                  readme_text = readme_text.replace(docs_marker, docs_marker + '\n' + docs_line, 1)
+              else:
+                  readme_text += '\n' + docs_line + '\n'
+          implementation_marker = '- a content-addressed evidence metadata plane with provenance DAGs, source independence, sensitivity, taint, and availability state;'
+          implementation_line = '- an atomic SQLite canonical event-byte ledger with event/receipt hash chains, idempotent receipts, audit records, and whole-ledger cursor CAS;'
+          if implementation_line not in readme_text and implementation_marker in readme_text:
+              readme_text = readme_text.replace(
+                  implementation_marker,
+                  implementation_marker + '\n' + implementation_line,
+                  1,
+              )
+          readme.write_text(readme_text)
+
+          roadmap = Path('docs/ROADMAP.md')
+          roadmap_text = roadmap.read_text()
+          old = '- SQLite event ledger and projection checkpoints;'
+          new = '- [x] atomic SQLite canonical event-byte ledger, audit records, idempotent receipts, and whole-ledger cursor CAS;\n- [ ] projection checkpoints coordinated with the canonical cursor;'
+          if old in roadmap_text:
+              roadmap_text = roadmap_text.replace(old, new, 1)
+          roadmap.write_text(roadmap_text)
+
+          agents = Path('AGENTS.md')
+          agents_text = agents.read_text()
+          invariant = '- Durable canonical publication must atomically commit event bytes, transition audit, receipt, and cursor metadata; an index or receipt is never a second source of truth.'
+          if invariant not in agents_text:
+              marker = '- Canonical experience history is append-only.'
+              if marker in agents_text:
+                  agents_text = agents_text.replace(marker, marker + '\n' + invariant, 1)
+              else:
+                  agents_text += '\n' + invariant + '\n'
+          agents.write_text(agents_text)
+          PY
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22.16.0
+          cache: npm
+
+      - name: Verify minimum runtime
+        run: |
+          npm ci --ignore-scripts --no-audit --no-fund
+          npm run check
+          git diff --check
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          check-latest: true
+          cache: npm
+
+      - name: Verify latest Node 22 and changed-file security boundary
+        shell: bash
+        run: |
+          npm run check
+          git fetch origin main
+          files=$(git diff --name-only origin/main...HEAD)
+          printf '%s\n' "$files"
+          ! git diff origin/main...HEAD -- src/durable/canonical-ledger.ts | grep -E 'child_process|exec\(|spawn\(|fetch\(|https?://|load_extension|ATTACH DATABASE|PRAGMA writable_schema'
+          ! printf '%s\n' "$files" | grep -E 'debug_report|\.sqlite($|-)|\.db$|(^|/)(dist|node_modules)/'
+
+      - name: Commit exact reviewed product head
+        shell: bash
+        run: |
+          set -euo pipefail
+          rm -f .github/workflows/apply-durable-ledger.yml
+          git config user.name metaforismo
+          git config user.email 39646696+metaforismo@users.noreply.github.com
+          git add -A
+          git commit -m "feat: add durable canonical SQLite ledger"
+          git push origin HEAD:feat/durable-canonical-ledger-v1
+
+      - name: Open draft pull request
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          number=$(gh pr list --head feat/durable-canonical-ledger-v1 --base main --state open --json number --jq '.[0].number // empty')
+          body=$(mktemp)
+          cat > "$body" <<'EOF'
+          ## Summary
+
+          Adds a durable canonical SQLite event-byte store that atomically publishes accepted events, event-chain state, transition audit, idempotent receipt, receipt-chain state, and canonical cursor metadata.
+
+          ## Core contract
+
+          - canonical deterministic JSON event bytes and SHA-256 event chain;
+          - complete semantic prefix replay before every new v1 commit;
+          - `BEGIN IMMEDIATE` cursor compare-and-swap under the write lock;
+          - process-local cursor capability for new mutations;
+          - exact idempotent retry recovery after restart without granting new write authority;
+          - audit and receipt bytes bound to the same accepted transition metadata;
+          - receipt chain and event-to-revision attribution;
+          - rollback at every injected publication phase;
+          - bounded, locally verified range reads;
+          - fast tail status separated from complete O(N) forensic audit;
+          - partial canonical schema fails closed rather than resetting memory.
+
+          ## Verification
+
+          The application gate runs strict TypeScript build and the complete test suite on Node 22.16.0 and latest Node 22 before publishing this product head.
+
+          ## Explicit limits
+
+          New v1 commits replay and hash the full prefix, so commit/startup/full-audit cost remains O(N). The store does not authenticate actors or arbitrary verifier metadata, sign checkpoints, provide distributed consensus, or prove continual learning/infinite context.
+          EOF
+          if [ -z "$number" ]; then
+            gh pr create --draft --base main --head feat/durable-canonical-ledger-v1 --title "feat: add durable canonical SQLite ledger" --body-file "$body"
+          else
+            gh pr edit "$number" --title "feat: add durable canonical SQLite ledger" --body-file "$body"
+          fi
