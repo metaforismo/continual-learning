@@ -51,6 +51,14 @@ jobs:
             src/retrieval/incremental.ts \
             src/retrieval/index.ts \
             test/incremental-projection.test.mjs | sort)
+          git add -N \
+            AGENTS.md \
+            README.md \
+            docs/INCREMENTAL_FTS5.md \
+            docs/ROADMAP.md \
+            src/retrieval/incremental.ts \
+            src/retrieval/index.ts \
+            test/incremental-projection.test.mjs
           actual=$(git diff --name-only origin/main -- | sort)
           if [[ "$actual" != "$expected" ]]; then
             echo 'Unexpected final diff:'
