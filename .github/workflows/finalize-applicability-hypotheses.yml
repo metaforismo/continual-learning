@@ -1,0 +1,373 @@
+name: Finalize held-out applicability hypotheses (temporary)
+
+on:
+  push:
+    branches:
+      - feat/applicability-hypotheses-v1
+
+permissions:
+  contents: write
+  pull-requests: write
+  checks: read
+
+concurrency:
+  group: applicability-hypotheses-final
+  cancel-in-progress: true
+
+jobs:
+  finalize:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 50
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: feat/applicability-hypotheses-v1
+          fetch-depth: 0
+
+      - name: Align with current main and require experience-attribution foundation
+        shell: bash
+        run: |
+          set -euo pipefail
+          git fetch origin main
+          git merge --no-edit origin/main
+          test -f src/learning/experience.ts
+          test -f docs/EXPERIENCE_ATTRIBUTION.md
+          test -f src/learning/applicability.ts
+          test -f test/applicability-hypotheses.test.mjs
+          test -f docs/APPLICABILITY_HYPOTHESES.md
+
+      - name: Bind structured context features to issued traces and interventions
+        shell: bash
+        run: |
+          set -euo pipefail
+          python <<'PY'
+          from pathlib import Path
+
+          source = Path('src/learning/experience.ts')
+          text = source.read_text()
+
+          def replace_once(old: str, new: str) -> None:
+              global text
+              if old not in text:
+                  raise SystemExit(f'missing experience context-feature block: {old[:150]!r}')
+              text = text.replace(old, new, 1)
+
+          if 'const CONTEXT_FEATURE_PATTERN' not in text:
+              marker = "const VERIFIERS = new Set(['none', 'model', 'tool', 'test', 'human']);"
+              if marker not in text:
+                  raise SystemExit('missing experience verifier constants')
+              text = text.replace(
+                  marker,
+                  marker + "\nconst CONTEXT_FEATURE_PATTERN = /^[a-z0-9][a-z0-9._:/=-]{0,127}$/;\nconst MAX_CONTEXT_FEATURES = 64;",
+                  1,
+              )
+
+          if 'function normalizeExperienceContextFeatures' not in text:
+              marker = 'export type ExperienceCaptureMode ='
+              at = text.index(marker)
+              helper = '''function normalizeExperienceContextFeatures(
+  features: readonly string[] | undefined,
+): readonly string[] {
+  if (features === undefined) return Object.freeze([]);
+  if (!Array.isArray(features) || features.length > MAX_CONTEXT_FEATURES) {
+    throw new Error(`contextFeatures cannot exceed ${MAX_CONTEXT_FEATURES} values`);
+  }
+  const normalized = features.map((feature) => {
+    if (typeof feature !== 'string') throw new Error('context feature must be a string');
+    const value = feature.trim().toLowerCase();
+    if (!CONTEXT_FEATURE_PATTERN.test(value)) {
+      throw new Error(`context feature is invalid: ${feature}`);
+    }
+    return value;
+  });
+  if (new Set(normalized).size !== normalized.length) {
+    throw new Error('contextFeatures cannot contain duplicates after normalization');
+  }
+  return Object.freeze(normalized.sort());
+}
+
+'''
+              text = text[:at] + helper + text[at:]
+
+          if 'readonly contextFeatures?: readonly string[];' not in text:
+              replace_once(
+                  '''  readonly contextFingerprint: string;
+  readonly goalSignature: string;''',
+                  '''  readonly contextFingerprint: string;
+  readonly contextFeatures?: readonly string[];
+  readonly goalSignature: string;''',
+              )
+
+          if text.count('readonly contextFeatures: readonly string[];') < 2:
+              first = '''  readonly contextFingerprint: string;
+  readonly goalSignature: string;
+  readonly unit: ExperienceUnit;'''
+              replacement = '''  readonly contextFingerprint: string;
+  readonly contextFeatures: readonly string[];
+  readonly goalSignature: string;
+  readonly unit: ExperienceUnit;'''
+              if first not in text:
+                  raise SystemExit('missing verified trace context block')
+              text = text.replace(first, replacement, 1)
+              second = '''  readonly unitDigest: string;
+  readonly contextFingerprint: string;
+  readonly treatmentOutcome: VerifiedExperienceTrace['outcome'];'''
+              second_replacement = '''  readonly unitDigest: string;
+  readonly contextFingerprint: string;
+  readonly contextFeatures: readonly string[];
+  readonly treatmentOutcome: VerifiedExperienceTrace['outcome'];'''
+              if second not in text:
+                  raise SystemExit('missing intervention context block')
+              text = text.replace(second, second_replacement, 1)
+
+          if 'const contextFeatures = normalizeExperienceContextFeatures(input.contextFeatures);' not in text:
+              marker = '''  if (!Array.isArray(input.exposures)) throw new Error('experience exposures must be an array');'''
+              if marker not in text:
+                  raise SystemExit('missing trace exposures validation')
+              text = text.replace(
+                  marker,
+                  "  const contextFeatures = normalizeExperienceContextFeatures(input.contextFeatures);\n" + marker,
+                  1,
+              )
+
+          unsigned_marker = '''    taskId: input.taskId,
+    contextFingerprint: input.contextFingerprint,
+    goalSignature: input.goalSignature,'''
+          if unsigned_marker in text:
+              text = text.replace(
+                  unsigned_marker,
+                  '''    taskId: input.taskId,
+    contextFingerprint: input.contextFingerprint,
+    contextFeatures,
+    goalSignature: input.goalSignature,''',
+                  1,
+              )
+
+          match_block = '''    treatment.unit.taskFamily !== control.unit.taskFamily ||
+    treatment.contextFingerprint !== control.contextFingerprint ||
+    treatment.goalSignature !== control.goalSignature
+  ) {
+    throw new Error('treatment and control are not matched on scope/unit/context/goal');
+  }'''
+          if match_block in text:
+              text = text.replace(
+                  match_block,
+                  '''    treatment.unit.taskFamily !== control.unit.taskFamily ||
+    treatment.contextFingerprint !== control.contextFingerprint ||
+    stableJson(treatment.contextFeatures) !== stableJson(control.contextFeatures) ||
+    treatment.goalSignature !== control.goalSignature
+  ) {
+    throw new Error('treatment and control are not matched on scope/unit/context/goal/context features');
+  }''',
+                  1,
+              )
+
+          intervention_marker = '''    unitDigest: treatment.unitDigest,
+    contextFingerprint: treatment.contextFingerprint,
+    treatmentOutcome: treatment.outcome,'''
+          if intervention_marker in text:
+              text = text.replace(
+                  intervention_marker,
+                  '''    unitDigest: treatment.unitDigest,
+    contextFingerprint: treatment.contextFingerprint,
+    contextFeatures: treatment.contextFeatures,
+    treatmentOutcome: treatment.outcome,''',
+                  1,
+              )
+
+          if 'export function assertIssuedMemoryIntervention' not in text:
+              text += '''
+
+export function assertIssuedExperienceTrace(
+  value: unknown,
+): asserts value is VerifiedExperienceTrace {
+  if (typeof value !== 'object' || value === null || !ISSUED_TRACES.has(value)) {
+    throw new Error('operation requires an issued experience trace');
+  }
+}
+
+export function assertIssuedMemoryIntervention(
+  value: unknown,
+): asserts value is VerifiedMemoryIntervention {
+  if (typeof value !== 'object' || value === null || !ISSUED_INTERVENTIONS.has(value)) {
+    throw new Error('operation requires an issued memory intervention');
+  }
+}
+'''
+          source.write_text(text)
+          PY
+
+      - name: Replace experimental digest shim with kernel-local SHA-256
+        shell: bash
+        run: |
+          set -euo pipefail
+          python <<'PY'
+          from pathlib import Path
+          path = Path('src/learning/applicability.ts')
+          text = path.read_text()
+          if not text.startswith("import { createHash } from 'node:crypto';"):
+              text = "import { createHash } from 'node:crypto';\n\n" + text
+          start = text.index('async function sha256(value: unknown): Promise<string> {')
+          end = text.index('\n\nexport interface ApplicabilityRule', start)
+          replacement = '''function digest(value: unknown): string {
+  return `sha256:${createHash('sha256').update(stableJson(value)).digest('hex')}`;
+}'''
+          text = text[:start] + replacement + text[end:]
+          text = text.replace('syncDigest({ domain:', 'digest({ domain:')
+          path.write_text(text)
+          PY
+
+      - name: Wire exports, documentation, roadmap, and repository invariants
+        shell: bash
+        run: |
+          set -euo pipefail
+          python <<'PY'
+          from pathlib import Path
+
+          learning_index = Path('src/learning/index.ts')
+          index_text = learning_index.read_text()
+          export = "export * from './applicability.js';\n"
+          if export not in index_text:
+              learning_index.write_text(index_text + export)
+
+          readme = Path('README.md')
+          readme_text = readme.read_text()
+          marker = '- [Verified experience attribution](docs/EXPERIENCE_ATTRIBUTION.md)'
+          line = '- [Held-out applicability hypotheses](docs/APPLICABILITY_HYPOTHESES.md)'
+          if line not in readme_text:
+              if marker in readme_text:
+                  readme_text = readme_text.replace(marker, marker + '\n' + line, 1)
+              else:
+                  readme_text += '\n' + line + '\n'
+          implementation_marker = '- canonical-outcome-bound experience traces and strict paired single-memory attribution that never promotes correlation alone;'
+          implementation_line = '- deterministic bounded applicability-rule induction with disjoint held-out validation, counterexamples, and first-class ambiguity;'
+          if implementation_line not in readme_text and implementation_marker in readme_text:
+              readme_text = readme_text.replace(
+                  implementation_marker,
+                  implementation_marker + '\n' + implementation_line,
+                  1,
+              )
+          readme.write_text(readme_text)
+
+          roadmap = Path('docs/ROADMAP.md')
+          roadmap_text = roadmap.read_text()
+          marker = '- [x] staged exposure/use traces and strict paired single-memory intervention evidence;'
+          line = '- [x] bounded conjunctive applicability hypotheses with disjoint held-out validation and ambiguity detection;'
+          if line not in roadmap_text:
+              if marker in roadmap_text:
+                  roadmap_text = roadmap_text.replace(marker, marker + '\n' + line, 1)
+              else:
+                  roadmap_text += '\n' + line + '\n'
+          roadmap.write_text(roadmap_text)
+
+          agents = Path('AGENTS.md')
+          agents_text = agents.read_text()
+          invariant = '- Applicability discovery and validation must use disjoint experimental units and verifier origins; a validated hypothesis is still not procedure execution authority.'
+          if invariant not in agents_text:
+              marker = '- Successful co-occurrence is never memory credit: directional utility support requires issued, strongly verified, independent paired interventions whose applied-memory sets differ only by the target memory.'
+              if marker in agents_text:
+                  agents_text = agents_text.replace(marker, marker + '\n' + invariant, 1)
+              else:
+                  agents_text += '\n' + invariant + '\n'
+          agents.write_text(agents_text)
+
+          experience_docs = Path('docs/EXPERIENCE_ATTRIBUTION.md')
+          docs_text = experience_docs.read_text()
+          feature_note = '''
+## Runtime context features
+
+A runtime-instrumented trace may include bounded canonical `contextFeatures`. They are frozen into the trace digest before paired attribution, and treatment/control must carry the exact same feature snapshot. Applicability learning may consume those features later; it may not add labels retroactively after observing outcomes.
+'''
+          if '## Runtime context features' not in docs_text:
+              insertion = docs_text.find('\n## Experimental unit')
+              if insertion >= 0:
+                  docs_text = docs_text[:insertion] + feature_note + docs_text[insertion:]
+              else:
+                  docs_text += feature_note
+              experience_docs.write_text(docs_text)
+          PY
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22.16.0
+          cache: npm
+
+      - name: Verify minimum supported runtime
+        run: |
+          npm ci --ignore-scripts --no-audit --no-fund
+          npm run check
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          check-latest: true
+          cache: npm
+
+      - name: Verify latest Node 22 and exact trust boundary
+        shell: bash
+        run: |
+          npm run check
+          git diff --check
+          git fetch origin main
+          files=$(git diff --name-only origin/main...HEAD)
+          printf '%s\n' "$files"
+          test -f src/learning/applicability.ts
+          test -f test/applicability-hypotheses.test.mjs
+          test -f docs/APPLICABILITY_HYPOTHESES.md
+          ! git diff origin/main...HEAD -- src/learning/applicability.ts src/learning/experience.ts | grep -E 'child_process|spawn\(|execFile|https?://|process\.env|eval\(|new Function'
+          ! printf '%s\n' "$files" | grep -E 'debug_report|\.sqlite($|-)|\.db$|(^|/)(dist|node_modules)/'
+
+      - name: Publish clean product head
+        shell: bash
+        run: |
+          set -euo pipefail
+          rm -f .github/workflows/finalize-applicability-hypotheses.yml
+          git config user.name metaforismo
+          git config user.email 39646696+metaforismo@users.noreply.github.com
+          git add -A
+          git commit -m "feat: add held-out applicability hypotheses"
+          git push origin HEAD:feat/applicability-hypotheses-v1
+
+      - name: Open PR, wait for clean-head CI, and merge only on green
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          number=$(gh pr list --head feat/applicability-hypotheses-v1 --base main --state open --json number --jq '.[0].number // empty')
+          body=$(mktemp)
+          cat > "$body" <<'EOF'
+          ## Summary
+
+          Adds bounded deterministic applicability-rule induction from independent paired memory effects, followed by disjoint held-out validation.
+
+          ## Contract
+
+          - structured context features are canonicalized and frozen into runtime-issued experience traces;
+          - treatment and control must share the exact feature snapshot;
+          - discovery and validation cannot share experimental units or verifier source groups;
+          - interpretable required/forbidden feature conjunctions with bounded clauses/features;
+          - deterministic greedy induction with complexity penalty and minimum discovery recall;
+          - held-out precision, recall, counterexample activation, effect, and context-coverage gates;
+          - identical feature signatures with opposite effects remain `ambiguous`;
+          - candidate and validation objects are process-local capabilities;
+          - a validated hypothesis remains non-authoritative for procedure execution.
+
+          ## Verification
+
+          Exact product head is admitted only after strict TypeScript build and the full suite pass on Node 22.16.0 and latest Node 22, followed by permanent PR CI.
+
+          ## Explicit limitations
+
+          Feature instrumentation is not authenticated, hidden confounding remains possible, hypotheses are not yet durable canonical learning events, the rule language is a single bounded conjunction, and no automatic procedure promotion, infinite-context, or solved-continual-learning claim is made.
+          EOF
+          if [ -z "$number" ]; then
+            url=$(gh pr create --draft --base main --head feat/applicability-hypotheses-v1 --title "feat: add held-out applicability hypotheses" --body-file "$body")
+            number=${url##*/}
+          else
+            gh pr edit "$number" --title "feat: add held-out applicability hypotheses" --body-file "$body"
+          fi
+          gh pr ready "$number" || true
+          sleep 10
+          gh pr checks "$number" --watch --fail-fast
+          gh pr merge "$number" --squash --delete-branch --subject "feat: add held-out applicability hypotheses (#$number)" --body "Add bounded deterministic context rules induced from independent paired effects and validated on disjoint experimental units and verifier origins. A validated hypothesis remains non-authoritative; no infinite-context or solved-continual-learning claim is made."
