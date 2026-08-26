@@ -1,0 +1,388 @@
+name: Finalize verified experience attribution (temporary)
+
+on:
+  push:
+    branches:
+      - feat/experience-attribution-v1
+
+permissions:
+  contents: write
+  pull-requests: write
+  checks: read
+
+concurrency:
+  group: experience-attribution-final
+  cancel-in-progress: true
+
+jobs:
+  finalize:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: feat/experience-attribution-v1
+          fetch-depth: 0
+
+      - name: Align with current main and require durable experience foundations
+        shell: bash
+        run: |
+          set -euo pipefail
+          git fetch origin main
+          git merge --no-edit origin/main
+          test -f src/durable/canonical-ledger.ts
+          test -f src/durable/change-feed.ts
+          test -f src/durable/consumer-store.ts
+          test -f src/learning/experience.ts
+          test -f test/experience-attribution.test.mjs
+          test -f docs/EXPERIENCE_ATTRIBUTION.md
+
+      - name: Apply capability and runtime-validation hardening
+        shell: bash
+        run: |
+          set -euo pipefail
+          python <<'PY'
+          from pathlib import Path
+
+          source = Path('src/learning/experience.ts')
+          text = source.read_text()
+
+          def replace_once(old: str, new: str) -> None:
+              global text
+              if old not in text:
+                  raise SystemExit(f'missing experience hardening block: {old[:140]!r}')
+              text = text.replace(old, new, 1)
+
+          replace_once(
+              "import type { EvidenceRole, MemoryEvent } from '../domain.js';",
+              "import { isEvidenceRole, type EvidenceRole, type MemoryEvent } from '../domain.js';",
+          )
+          replace_once(
+              "const VERIFIERS = new Set(['none', 'model', 'tool', 'test', 'human']);",
+              "const VERIFIERS = new Set(['none', 'model', 'tool', 'test', 'human']);\nconst MEMORY_PACKET_KINDS = new Set([\n  'state',\n  'episode',\n  'procedure',\n  'source',\n  'constraint',\n  'summary',\n]);\nconst ISSUED_TRACES = new WeakSet<object>();\nconst ISSUED_INTERVENTIONS = new WeakSet<object>();",
+          )
+          replace_once(
+              '''    ids.add(exposure.memoryId);
+    if (!EXPOSURE_STAGES.has(exposure.stage)) throw new Error('memory exposure stage is invalid');''',
+              '''    ids.add(exposure.memoryId);
+    if (!MEMORY_PACKET_KINDS.has(exposure.kind)) {
+      throw new Error('memory exposure kind is invalid');
+    }
+    if (!EXPOSURE_STAGES.has(exposure.stage)) throw new Error('memory exposure stage is invalid');''',
+          )
+          replace_once(
+              '''    const roles = exposure.roles === undefined
+      ? Object.freeze([])
+      : uniqueStrings(exposure.roles, 'memory exposure roles') as readonly EvidenceRole[];''',
+              '''    const roles = exposure.roles === undefined
+      ? Object.freeze([])
+      : uniqueStrings(exposure.roles, 'memory exposure roles') as readonly EvidenceRole[];
+    if (roles.some((role) => !isEvidenceRole(role))) {
+      throw new Error('memory exposure contains an unknown evidence role');
+    }''',
+          )
+
+          old = '''  return canonicalClone({
+    ...unsigned,
+    traceDigest: digest({ domain: 'cl-experience-trace-v1', trace: unsigned }),
+  });
+}'''
+          new = '''  const result = canonicalClone({
+    ...unsigned,
+    traceDigest: digest({ domain: 'cl-experience-trace-v1', trace: unsigned }),
+  });
+  ISSUED_TRACES.add(result as object);
+  return result;
+}'''
+          replace_once(old, new)
+
+          old = '''  if (input.treatmentTraceId === input.controlTraceId) {
+    throw new Error('memory intervention requires distinct treatment and control traces');
+  }
+  const treatment = traces.find((trace) => trace.id === input.treatmentTraceId);
+  const control = traces.find((trace) => trace.id === input.controlTraceId);
+  if (treatment === undefined || control === undefined) {
+    throw new Error('memory intervention references an unknown trace');
+  }'''
+          new = '''  if (
+    typeof input.treatmentTraceId !== 'string' ||
+    input.treatmentTraceId.trim().length === 0 ||
+    typeof input.controlTraceId !== 'string' ||
+    input.controlTraceId.trim().length === 0
+  ) {
+    throw new Error('memory intervention trace ids must be non-empty');
+  }
+  if (!Array.isArray(traces)) throw new TypeError('memory intervention traces must be an array');
+  if (input.treatmentTraceId === input.controlTraceId) {
+    throw new Error('memory intervention requires distinct treatment and control traces');
+  }
+  const treatmentMatches = traces.filter((trace) => trace.id === input.treatmentTraceId);
+  const controlMatches = traces.filter((trace) => trace.id === input.controlTraceId);
+  if (treatmentMatches.length !== 1 || controlMatches.length !== 1) {
+    throw new Error('memory intervention requires exactly one issued experience trace per arm');
+  }
+  const treatment = treatmentMatches[0];
+  const control = controlMatches[0];
+  if (
+    treatment === undefined ||
+    control === undefined ||
+    !ISSUED_TRACES.has(treatment as object) ||
+    !ISSUED_TRACES.has(control as object)
+  ) {
+    throw new Error('memory intervention requires an issued experience trace for each arm');
+  }'''
+          replace_once(old, new)
+
+          old = '''  return canonicalClone({
+    ...unsigned,
+    comparisonDigest: digest({ domain: 'cl-memory-intervention-v1', comparison: unsigned }),
+  });
+}'''
+          new = '''  const result = canonicalClone({
+    ...unsigned,
+    comparisonDigest: digest({ domain: 'cl-memory-intervention-v1', comparison: unsigned }),
+  });
+  ISSUED_INTERVENTIONS.add(result as object);
+  return result;
+}'''
+          replace_once(old, new)
+
+          old = '''  if (typeof memoryId !== 'string' || memoryId.trim().length === 0) {
+    throw new Error('memory utility assessment requires a memoryId');
+  }
+  validatePolicy(policy);'''
+          new = '''  if (typeof memoryId !== 'string' || memoryId.trim().length === 0) {
+    throw new Error('memory utility assessment requires a memoryId');
+  }
+  if (!Array.isArray(traces) || !Array.isArray(comparisons)) {
+    throw new TypeError('memory utility traces and comparisons must be arrays');
+  }
+  if (traces.some((trace) => !ISSUED_TRACES.has(trace as object))) {
+    throw new Error('memory utility assessment requires an issued experience trace');
+  }
+  if (comparisons.some((comparison) => !ISSUED_INTERVENTIONS.has(comparison as object))) {
+    throw new Error('memory utility assessment requires an issued memory intervention');
+  }
+  const traceIds = traces.map((trace) => trace.id);
+  const traceDigests = traces.map((trace) => trace.traceDigest);
+  if (
+    new Set(traceIds).size !== traceIds.length ||
+    new Set(traceDigests).size !== traceDigests.length
+  ) {
+    throw new Error('memory utility traces must have unique ids and digests');
+  }
+  const comparisonIds = comparisons.map((comparison) => comparison.id);
+  const comparisonDigests = comparisons.map((comparison) => comparison.comparisonDigest);
+  if (
+    new Set(comparisonIds).size !== comparisonIds.length ||
+    new Set(comparisonDigests).size !== comparisonDigests.length
+  ) {
+    throw new Error('memory utility interventions must have unique ids and digests');
+  }
+  validatePolicy(policy);'''
+          replace_once(old, new)
+          source.write_text(text)
+
+          tests = Path('test/experience-attribution.test.mjs')
+          test_text = tests.read_text()
+          marker = "test('stale canonical fingerprints and unavailable outcome evidence fail closed', () => {"
+          extra = '''test('unknown packet kinds and evidence roles fail at trace admission', () => {
+  const scenario = new Scenario();
+  const run = scenario.addRun('runtime-enums', 'success', 'context/a');
+  const badKind = traceInput(scenario, run);
+  badKind.exposures[0].kind = 'not-a-kind';
+  assert.throws(
+    () => recordExperienceTrace(scenario.events(), badKind),
+    /exposure kind is invalid/,
+  );
+
+  const badRole = traceInput(scenario, run);
+  badRole.id = 'trace/bad-role';
+  badRole.exposures[0].roles = ['not-a-role'];
+  assert.throws(
+    () => recordExperienceTrace(scenario.events(), badRole),
+    /unknown evidence role/,
+  );
+});
+
+'''
+          if extra not in test_text:
+            if marker not in test_text:
+              raise SystemExit('missing experience test insertion marker')
+            test_text = test_text.replace(marker, extra + marker, 1)
+
+          marker = "test('five independent positive pairs across contexts support positive utility', () => {"
+          extra = '''test('paired outcomes from one verifier source group are not independent', () => {
+  const scenario = new Scenario();
+  const treatmentRun = scenario.addRun('shared/treatment', 'success', 'context/a', 'shared-run');
+  const controlRun = scenario.addRun('shared/control', 'failure', 'context/a', 'shared-run');
+  const events = scenario.events();
+  const sharedUnit = unit('shared', 'context/a');
+  const treatment = recordExperienceTrace(
+    events,
+    traceInput(scenario, treatmentRun, { unit: sharedUnit }),
+  );
+  const control = recordExperienceTrace(
+    events,
+    traceInput(scenario, controlRun, { unit: sharedUnit, targetStage: 'activated' }),
+  );
+  assert.throws(
+    () =>
+      verifyMemoryIntervention([treatment, control], {
+        id: 'comparison/shared-origin',
+        memoryId: 'memory/target',
+        treatmentTraceId: treatment.id,
+        controlTraceId: control.id,
+        intervention: 'removed',
+        actor: 'experiment-controller',
+        recordedAt: scenario.time,
+      }),
+    /independent verifier source groups/,
+  );
+});
+
+'''
+          if extra not in test_text:
+            if marker not in test_text:
+              raise SystemExit('missing paired-source test insertion marker')
+            test_text = test_text.replace(marker, extra + marker, 1)
+          tests.write_text(test_text)
+
+          learning_index = Path('src/learning/index.ts')
+          learning_index.write_text("export * from './experience.js';\n")
+          root = Path('src/index.ts')
+          root_text = root.read_text()
+          export = "export * from './learning/index.js';\n"
+          if export not in root_text:
+            root.write_text(root_text + export)
+
+          readme = Path('README.md')
+          readme_text = readme.read_text()
+          docs_marker = '- [Durable consumer checkpoints](docs/DURABLE_CONSUMER_CHECKPOINTS.md)'
+          docs_line = '- [Verified experience attribution](docs/EXPERIENCE_ATTRIBUTION.md)'
+          if docs_line not in readme_text:
+            if docs_marker in readme_text:
+              readme_text = readme_text.replace(docs_marker, docs_marker + '\n' + docs_line, 1)
+            else:
+              readme_text += '\n' + docs_line + '\n'
+          implementation_marker = '- an atomic per-consumer SQLite checkpoint/receipt store for trusted projection transactions and durable batch idempotency;'
+          implementation_line = '- canonical-outcome-bound experience traces and strict paired single-memory attribution that never promotes correlation alone;'
+          if implementation_line not in readme_text and implementation_marker in readme_text:
+            readme_text = readme_text.replace(
+              implementation_marker,
+              implementation_marker + '\n' + implementation_line,
+              1,
+            )
+          readme.write_text(readme_text)
+
+          roadmap = Path('docs/ROADMAP.md')
+          roadmap_text = roadmap.read_text()
+          roadmap_text = roadmap_text.replace(
+            '- trajectory/outcome capture adapters;',
+            '- [x] canonical outcome-bound experience trace contract;\n- [ ] harness trajectory/outcome capture adapters;',
+            1,
+          )
+          roadmap_text = roadmap_text.replace(
+            '- causal usage traces;',
+            '- [x] staged exposure/use traces and strict paired single-memory intervention evidence;\n- [ ] randomized and counterfactual causal usage experiments;',
+            1,
+          )
+          roadmap.write_text(roadmap_text)
+
+          agents = Path('AGENTS.md')
+          agents_text = agents.read_text()
+          invariant = '- Successful co-occurrence is never memory credit: directional utility support requires issued, strongly verified, independent paired interventions whose applied-memory sets differ only by the target memory.'
+          if invariant not in agents_text:
+            marker = '- A consumer offset may advance only in the same trusted transaction as its projection mutation and batch receipt; async or untrusted callbacks are out of contract.'
+            if marker in agents_text:
+              agents_text = agents_text.replace(marker, marker + '\n' + invariant, 1)
+            else:
+              agents_text += '\n' + invariant + '\n'
+          agents.write_text(agents_text)
+          PY
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22.16.0
+          cache: npm
+
+      - name: Verify minimum supported runtime
+        run: |
+          npm ci --ignore-scripts --no-audit --no-fund
+          npm run check
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          check-latest: true
+          cache: npm
+
+      - name: Verify latest Node 22 and exact security boundary
+        shell: bash
+        run: |
+          npm run check
+          git diff --check
+          git fetch origin main
+          files=$(git diff --name-only origin/main...HEAD)
+          printf '%s\n' "$files"
+          test -f src/learning/experience.ts
+          test -f src/learning/index.ts
+          test -f test/experience-attribution.test.mjs
+          test -f docs/EXPERIENCE_ATTRIBUTION.md
+          ! git diff origin/main...HEAD -- src/learning/experience.ts | grep -E 'child_process|spawn\(|execFile|https?://|process\.env|eval\(|new Function'
+          ! printf '%s\n' "$files" | grep -E 'debug_report|\.sqlite($|-)|\.db$|(^|/)(dist|node_modules)/'
+
+      - name: Publish clean product head
+        shell: bash
+        run: |
+          set -euo pipefail
+          rm -f .github/workflows/finalize-experience-attribution.yml
+          git config user.name metaforismo
+          git config user.email 39646696+metaforismo@users.noreply.github.com
+          git add -A
+          git commit -m "feat: add verified experience attribution"
+          git push origin HEAD:feat/experience-attribution-v1
+
+      - name: Open PR, wait for clean-head CI, and merge only on green
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          number=$(gh pr list --head feat/experience-attribution-v1 --base main --state open --json number --jq '.[0].number // empty')
+          body=$(mktemp)
+          cat > "$body" <<'EOF'
+          ## Summary
+
+          Adds canonical-outcome-bound experience traces and strict paired single-memory attribution.
+
+          ## Contract
+
+          - exact canonical fingerprint and current evidence checks at trace admission;
+          - explicit activated/materialized/consulted/applied exposure stages;
+          - credit eligibility only for runtime-instrumented applied memories;
+          - process-local issued trace/intervention capabilities;
+          - treatment/control matching on unit, scope, context, and goal;
+          - applied-memory sets may differ only by the target memory;
+          - strongly verified outcomes with disjoint independent source groups;
+          - success/failure/partial contrasts, independent-unit/source deduplication, Wilson bounds, and positive/negative/mixed/neutral status;
+          - unpaired successful co-occurrence remains diagnostic and never satisfies promotion gates.
+
+          ## Verification
+
+          Exact product head is admitted only after strict TypeScript build and the full suite pass on Node 22.16.0 and latest Node 22, followed by permanent PR CI.
+
+          ## Explicit limitations
+
+          Traces and interventions are process-local capabilities and are not yet durable canonical experience events. Trace fingerprinting is O(N). Paired matching does not eliminate hidden confounding, and this PR does not automatically promote procedures, mutate retrieval policy, prove arbitrary causality, infinite context, or continual learning.
+          EOF
+          if [ -z "$number" ]; then
+            url=$(gh pr create --draft --base main --head feat/experience-attribution-v1 --title "feat: add verified experience attribution" --body-file "$body")
+            number=${url##*/}
+          else
+            gh pr edit "$number" --title "feat: add verified experience attribution" --body-file "$body"
+          fi
+          gh pr ready "$number" || true
+          sleep 10
+          gh pr checks "$number" --watch --fail-fast
+          gh pr merge "$number" --squash --delete-branch --subject "feat: add verified experience attribution (#$number)" --body "Add process-issued outcome-bound traces and strict independent paired single-memory attribution. Successful co-occurrence alone never earns utility credit. No arbitrary-causality, infinite-context, or solved-continual-learning claim is made."
