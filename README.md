@@ -87,6 +87,7 @@ The foundational TypeScript kernel currently includes:
 - a dependency-, evidence-role-, diversity-, and token-budget-aware context compiler;
 - a capability-gated transition verifier with isolated replay, base-fingerprint CAS, exact deltas, input coverage, state assertions, taint/risk gates, and append-only verdict audit;
 - a rebuildable SQLite FTS5 projection that emits addresses only, binds generations to canonical fingerprints and privacy configuration, detects row/manifest corruption, and requires canonical rehydration;
+- a checkpointed FTS5 diff publisher with exact-prefix verification, changed-row repair, privacy-filtered reverse dependencies, hash-chained checkpoints, fixed bucket manifests, and cache-independent rehydration;
 - procedure promotion gates based on independent evidence, verified outcomes, counterexample search, applicability boundaries, failure rate, and Wilson confidence bounds.
 
 The correctness kernel remains model- and harness-agnostic. SQLite FTS5 is an optional disposable retrieval adapter; no embedding provider, LLM dependency, or DeepSeek Harness coupling is part of canonical memory semantics.
@@ -100,7 +101,7 @@ npm install
 npm test
 ```
 
-The test suite currently exercises 122 foundational, state, transition, and lexical-projection scenarios.
+The test suite currently exercises 146 foundational, state, transition, and lexical-projection scenarios.
 
 ## Documentation
 
@@ -109,6 +110,7 @@ The test suite currently exercises 122 foundational, state, transition, and lexi
 - [State adjudication](docs/STATE_ADJUDICATION.md)
 - [Transition verification](docs/TRANSITION_VERIFICATION.md)
 - [FTS5 lexical projection](docs/FTS5_PROJECTION.md)
+- [Checkpointed FTS5 diff publication](docs/INCREMENTAL_FTS5.md)
 - [Learning contract](docs/LEARNING_CONTRACT.md)
 - [Failure modes and mitigations](docs/FAILURE_MODES.md)
 - [Evaluation and evidence ladder](docs/EVALUATION.md)
@@ -133,4 +135,4 @@ Those claims must be earned independently through the evidence ladder.
 
 ## Status
 
-Foundational kernel, deterministic state adjudicator, in-memory transition verifier, and disposable FTS5 candidate projection. APIs may change while durable canonical storage, incremental projection, authenticated actors, and evaluation boundaries are established.
+Foundational kernel, deterministic state adjudicator, in-memory transition verifier, and disposable FTS5 candidate projections with checkpointed changed-row publication. APIs may change while durable canonical storage, O(k) canonical cursors, authenticated actors, and evaluation boundaries are established.

@@ -33,7 +33,8 @@ Exit gate: all Level 1 evidence requirements in [EVALUATION.md](EVALUATION.md).
 - [x] configuration-bound projection watermarks, full manifests, atomic rebuild, and fork detection;
 - [x] source/artifact content-addressing contract;
 - artifact/blob provider with digest verification;
-- evidence metadata persistence and incremental projection checkpoints;
+- [x] checkpointed FTS5 changed-row publication, exact-prefix verification, fixed bucket manifests, and hash-chained projection checkpoints;
+- evidence metadata persistence and O(k) canonical cursor advancement;
 - export, inspect, supersede, suppress, and forget APIs;
 - deterministic replay against persisted fixtures.
 
