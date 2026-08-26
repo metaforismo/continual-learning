@@ -377,6 +377,80 @@ test('fast verification binds metadata to every active-checkpoint field', () => 
   }
 });
 
+test('fast verification rejects hidden suffixes in bucket digests', () => {
+  const location = temporaryDatabase();
+  try {
+    const { kernel } = baseKernel();
+    const projection = new SqliteIncrementalFts5Projection({ database: location.database });
+    projection.rebuild(kernel.events());
+    const attacker = new DatabaseSync(location.database);
+    attacker
+      .prepare(`
+        UPDATE cl_incremental_buckets
+           SET bucket_digest = bucket_digest || char(0) || 'hidden-suffix'
+         WHERE manifest_kind = 'document' AND bucket = 0
+      `)
+      .run();
+    attacker.close();
+
+    assert.throws(() => projection.status(kernel.events()), /bucket digest encoding is non-canonical/);
+    assert.equal(projection.audit(kernel.events()).ok, false);
+    projection.rebuild(kernel.events());
+    assert.equal(projection.audit(kernel.events()).ok, true);
+    projection.close();
+  } finally {
+    location.cleanup();
+  }
+});
+
+test('fast verification rejects hidden suffixes in active metadata digests', () => {
+  const location = temporaryDatabase();
+  try {
+    const { kernel } = baseKernel();
+    const projection = new SqliteIncrementalFts5Projection({ database: location.database });
+    projection.rebuild(kernel.events());
+    const attacker = new DatabaseSync(location.database);
+    attacker
+      .prepare(`
+        UPDATE cl_incremental_meta
+           SET active_checkpoint_digest = active_checkpoint_digest || char(0) || 'hidden-suffix'
+         WHERE id = 1
+      `)
+      .run();
+    attacker.close();
+
+    assert.throws(() => projection.status(kernel.events()), /metadata text encoding is non-canonical/);
+    assert.equal(projection.audit(kernel.events()).ok, false);
+    projection.close();
+  } finally {
+    location.cleanup();
+  }
+});
+
+test('fast verification rejects hidden suffixes in checkpoint digests', () => {
+  const location = temporaryDatabase();
+  try {
+    const { kernel } = baseKernel();
+    const projection = new SqliteIncrementalFts5Projection({ database: location.database });
+    projection.rebuild(kernel.events());
+    const attacker = new DatabaseSync(location.database);
+    attacker
+      .prepare(`
+        UPDATE cl_incremental_checkpoints
+           SET previous_digest = previous_digest || char(0) || 'hidden-suffix'
+         WHERE generation = 1
+      `)
+      .run();
+    attacker.close();
+
+    assert.throws(() => projection.status(kernel.events()), /checkpoint 1 text encoding is non-canonical/);
+    assert.equal(projection.audit(kernel.events()).ok, false);
+    projection.close();
+  } finally {
+    location.cleanup();
+  }
+});
+
 test('fast verification recomputes the immediate predecessor checkpoint digest', () => {
   const location = temporaryDatabase();
   try {
@@ -733,6 +807,441 @@ test('search keeps one SQLite read snapshot while a concurrent writer publishes 
     assert.equal(writer.status(kernel.events()).fresh, true);
     reader.close();
     writer.close();
+  } finally {
+    location.cleanup();
+  }
+});
+
+test('canonical SQLite text containing U+0000 is rejected before publication', () => {
+  const eventKernel = new MemoryKernel();
+  eventKernel.captureEvidence(
+    { eventId: 'event\u0000suffix', recordedAt: 1, actor: 'human' },
+    evidence('evidence/event-nul', 'ordinary text'),
+  );
+  const eventProjection = new SqliteIncrementalFts5Projection();
+  assert.throws(() => eventProjection.rebuild(eventKernel.events()), /event id cannot contain U\+0000/);
+  assert.equal(eventProjection.status([]).initialized, false);
+  eventProjection.close();
+
+  const textKernel = new MemoryKernel();
+  textKernel.captureEvidence(
+    { eventId: 'event/evidence/text-nul', recordedAt: 1, actor: 'human' },
+    evidence('evidence/text-nul', 'prefix\u0000suffix'),
+  );
+  const textProjection = new SqliteIncrementalFts5Projection();
+  assert.throws(
+    () => textProjection.rebuild(textKernel.events()),
+    /search text cannot contain U\+0000/,
+  );
+  assert.equal(textProjection.status([]).initialized, false);
+  textProjection.close();
+
+  const malformedUnicodeKernel = new MemoryKernel();
+  malformedUnicodeKernel.captureEvidence(
+    { eventId: 'event/evidence/malformed-unicode', recordedAt: 1, actor: 'human' },
+    evidence('evidence/malformed-unicode', 'prefix\ud800suffix'),
+  );
+  const malformedUnicodeProjection = new SqliteIncrementalFts5Projection();
+  assert.throws(
+    () => malformedUnicodeProjection.rebuild(malformedUnicodeKernel.events()),
+    /search text must be well-formed Unicode/,
+  );
+  assert.equal(malformedUnicodeProjection.status([]).initialized, false);
+  malformedUnicodeProjection.close();
+
+  const emojiKernel = new MemoryKernel();
+  emojiKernel.captureEvidence(
+    { eventId: 'event/evidence/emoji', recordedAt: 1, actor: 'human' },
+    evidence('evidence/emoji', 'well-formed emoji 😀 memory'),
+  );
+  const emojiProjection = new SqliteIncrementalFts5Projection();
+  emojiProjection.rebuild(emojiKernel.events());
+  assert.equal(emojiProjection.audit(emojiKernel.events()).ok, true);
+  emojiProjection.close();
+});
+
+test('raw FTS generation type corruption is rejected, audited, and repaired on append', () => {
+  const location = temporaryDatabase();
+  try {
+    const { kernel } = baseKernel();
+    const projection = new SqliteIncrementalFts5Projection({ database: location.database });
+    projection.rebuild(kernel.events());
+    const attacker = new DatabaseSync(location.database);
+    attacker.prepare(`UPDATE cl_incremental_fts SET generation = '1junk'`).run();
+    attacker.close();
+
+    assert.throws(
+      () =>
+        projection.search(kernel.events(), 'preferred editor', {
+          scopeChain: ['project/incremental'],
+        }),
+      /malformed raw SQLite metadata/,
+    );
+    assert.equal(projection.audit(kernel.events()).ok, false);
+
+    const appended = evidence('evidence/generation-repair', 'generation repair trigger');
+    kernel.captureEvidence(
+      { eventId: 'event/evidence/generation-repair', recordedAt: 3, actor: 'human' },
+      appended,
+    );
+    projection.update(kernel.events());
+    const reader = new DatabaseSync(location.database);
+    const malformed = reader
+      .prepare(`SELECT COUNT(*) AS count FROM cl_incremental_fts WHERE typeof(generation) NOT IN ('integer', 'real')`)
+      .get();
+    reader.close();
+    assert.equal(malformed.count, 0);
+    assert.equal(projection.audit(kernel.events()).ok, true);
+    projection.close();
+  } finally {
+    location.cleanup();
+  }
+});
+
+test('search rejects duplicate exact FTS rows at the caller limit boundary', () => {
+  const location = temporaryDatabase();
+  try {
+    const { kernel } = baseKernel();
+    const projection = new SqliteIncrementalFts5Projection({ database: location.database });
+    projection.rebuild(kernel.events());
+    const attacker = new DatabaseSync(location.database);
+    attacker
+      .prepare(`
+        INSERT INTO cl_incremental_fts
+          (canonical_id, kind, scope, lifecycle, entry_digest, generation, search_text)
+        SELECT canonical_id, kind, scope, lifecycle, entry_digest, generation, search_text
+          FROM cl_incremental_fts
+         WHERE kind = 'claim' AND canonical_id = 'claim/editor'
+      `)
+      .run();
+    attacker.close();
+
+    assert.throws(
+      () =>
+        projection.search(kernel.events(), 'preferred editor', {
+          scopeChain: ['project/incremental'],
+          limit: 1,
+        }),
+      /duplicate incremental FTS row/,
+    );
+    assert.equal(projection.audit(kernel.events()).ok, false);
+    projection.close();
+  } finally {
+    location.cleanup();
+  }
+});
+
+test('NUL-suffixed FTS text corruption cannot hide behind Node SQLite text truncation', () => {
+  const location = temporaryDatabase();
+  try {
+    const { kernel } = baseKernel();
+    const projection = new SqliteIncrementalFts5Projection({ database: location.database });
+    projection.rebuild(kernel.events());
+    const attacker = new DatabaseSync(location.database);
+    attacker
+      .prepare(`
+        UPDATE cl_incremental_fts
+           SET entry_digest = entry_digest || char(0) || 'hidden-suffix'
+         WHERE kind = 'claim' AND canonical_id = 'claim/editor'
+      `)
+      .run();
+    attacker.close();
+
+    assert.throws(
+      () =>
+        projection.search(kernel.events(), 'preferred editor', {
+          scopeChain: ['project/incremental'],
+        }),
+      /malformed raw SQLite metadata/,
+    );
+    assert.equal(projection.audit(kernel.events()).ok, false);
+
+    const appended = evidence('evidence/nul-repair', 'NUL repair trigger');
+    kernel.captureEvidence(
+      { eventId: 'event/evidence/nul-repair', recordedAt: 3, actor: 'human' },
+      appended,
+    );
+    projection.update(kernel.events());
+    assert.equal(projection.audit(kernel.events()).ok, true);
+    projection.close();
+  } finally {
+    location.cleanup();
+  }
+});
+
+
+test('invalid UTF-8 FTS bytes cannot masquerade as a canonical replacement-character id', () => {
+  const location = temporaryDatabase();
+  try {
+    const kernel = new MemoryKernel();
+    kernel.captureEvidence(
+      { eventId: 'event/evidence/replacement', recordedAt: 1, actor: 'human' },
+      evidence('evidence/�', 'UTF-8 encoding sentinel'),
+    );
+    const projection = new SqliteIncrementalFts5Projection({ database: location.database });
+    projection.rebuild(kernel.events());
+    const attacker = new DatabaseSync(location.database);
+    attacker
+      .prepare(`
+        UPDATE cl_incremental_fts
+           SET canonical_id = CAST(X'65766964656E63652FFF' AS TEXT)
+         WHERE kind = 'evidence' AND canonical_id = 'evidence/�'
+      `)
+      .run();
+    attacker.close();
+
+    assert.throws(
+      () =>
+        projection.search(kernel.events(), 'encoding sentinel', {
+          scopeChain: ['project/incremental'],
+        }),
+      /malformed raw SQLite metadata/,
+    );
+    assert.equal(projection.audit(kernel.events()).ok, false);
+
+    const appended = evidence('evidence/utf8-repair', 'UTF-8 repair trigger');
+    kernel.captureEvidence(
+      { eventId: 'event/evidence/utf8-repair', recordedAt: 2, actor: 'human' },
+      appended,
+    );
+    projection.update(kernel.events());
+    assert.equal(projection.audit(kernel.events()).ok, true);
+    projection.close();
+  } finally {
+    location.cleanup();
+  }
+});
+
+test('invalid UTF-8 document identities are audited and repaired by rowid', () => {
+  const location = temporaryDatabase();
+  try {
+    const kernel = new MemoryKernel();
+    kernel.captureEvidence(
+      { eventId: 'event/evidence/document-encoding', recordedAt: 1, actor: 'human' },
+      evidence('evidence/�', 'document encoding sentinel'),
+    );
+    const projection = new SqliteIncrementalFts5Projection({ database: location.database });
+    projection.rebuild(kernel.events());
+    const attacker = new DatabaseSync(location.database);
+    attacker
+      .prepare(`
+        UPDATE cl_incremental_documents
+           SET canonical_id = CAST(X'65766964656E63652FFF' AS TEXT)
+         WHERE kind = 'evidence' AND canonical_id = 'evidence/�'
+      `)
+      .run();
+    attacker.close();
+
+    assert.throws(
+      () =>
+        projection.search(kernel.events(), 'document encoding sentinel', {
+          scopeChain: ['project/incremental'],
+        }),
+      /shadow row diverged/,
+    );
+    assert.equal(projection.audit(kernel.events()).ok, false);
+
+    const appended = evidence('evidence/document-repair', 'document repair trigger');
+    kernel.captureEvidence(
+      { eventId: 'event/evidence/document-repair', recordedAt: 2, actor: 'human' },
+      appended,
+    );
+    projection.update(kernel.events());
+    const reader = new DatabaseSync(location.database);
+    const repaired = reader
+      .prepare(`
+        SELECT hex(canonical_id) AS encoded
+          FROM cl_incremental_documents
+         WHERE kind = 'evidence' AND canonical_id = 'evidence/�'
+      `)
+      .get();
+    reader.close();
+    assert.equal(repaired.encoded, '65766964656E63652FEFBFBD');
+    assert.equal(projection.audit(kernel.events()).ok, true);
+    projection.close();
+  } finally {
+    location.cleanup();
+  }
+});
+
+test('invalid UTF-8 dependency identities are audited and repaired by rowid', () => {
+  const location = temporaryDatabase();
+  try {
+    const kernel = new MemoryKernel();
+    const source = evidence('evidence/�', 'dependency encoding sentinel');
+    kernel.captureEvidence(
+      { eventId: 'event/evidence/dependency-encoding', recordedAt: 1, actor: 'human' },
+      source,
+    );
+    kernel.assertClaim(
+      { eventId: 'event/claim/dependency-encoding', recordedAt: 2, actor: 'human' },
+      claim('claim/dependency-encoding', source),
+      { authorizeImmediately: true },
+    );
+    const projection = new SqliteIncrementalFts5Projection({ database: location.database });
+    projection.rebuild(kernel.events());
+    const attacker = new DatabaseSync(location.database);
+    attacker
+      .prepare(`
+        UPDATE cl_incremental_dependencies
+           SET evidence_id = CAST(X'65766964656E63652FFF' AS TEXT)
+         WHERE evidence_id = 'evidence/�'
+      `)
+      .run();
+    attacker.close();
+
+    assert.equal(projection.audit(kernel.events()).ok, false);
+    const appended = evidence('evidence/dependency-repair', 'dependency repair trigger');
+    kernel.captureEvidence(
+      { eventId: 'event/evidence/dependency-repair', recordedAt: 3, actor: 'human' },
+      appended,
+    );
+    projection.update(kernel.events());
+    const reader = new DatabaseSync(location.database);
+    const repaired = reader
+      .prepare(`
+        SELECT hex(evidence_id) AS encoded
+          FROM cl_incremental_dependencies
+         WHERE claim_id = 'claim/dependency-encoding'
+      `)
+      .get();
+    reader.close();
+    assert.equal(repaired.encoded, '65766964656E63652FEFBFBD');
+    assert.equal(projection.audit(kernel.events()).ok, true);
+    projection.close();
+  } finally {
+    location.cleanup();
+  }
+});
+
+test('duplicate document byte aliases are removed during append repair', () => {
+  const location = temporaryDatabase();
+  try {
+    const kernel = new MemoryKernel();
+    kernel.captureEvidence(
+      { eventId: 'event/evidence/document-alias', recordedAt: 1, actor: 'human' },
+      evidence('evidence/�', 'document alias sentinel'),
+    );
+    const projection = new SqliteIncrementalFts5Projection({ database: location.database });
+    projection.rebuild(kernel.events());
+    const attacker = new DatabaseSync(location.database);
+    attacker
+      .prepare(`
+        INSERT INTO cl_incremental_documents
+          (canonical_id, kind, scope, lifecycle, source_digest, search_text,
+           entry_digest, bucket, generation)
+        SELECT CAST(X'65766964656E63652FFF' AS TEXT), kind, scope, lifecycle,
+               source_digest, search_text, entry_digest, bucket, generation
+          FROM cl_incremental_documents
+         WHERE kind = 'evidence' AND canonical_id = 'evidence/�'
+      `)
+      .run();
+    attacker.close();
+
+    assert.equal(projection.audit(kernel.events()).ok, false);
+    const appended = evidence('evidence/document-alias-repair', 'document alias repair trigger');
+    kernel.captureEvidence(
+      { eventId: 'event/evidence/document-alias-repair', recordedAt: 2, actor: 'human' },
+      appended,
+    );
+    projection.update(kernel.events());
+    const reader = new DatabaseSync(location.database);
+    const aliases = reader
+      .prepare(`
+        SELECT COUNT(*) AS count
+          FROM cl_incremental_documents
+         WHERE kind = 'evidence'
+           AND CAST(canonical_id AS BLOB) IN (X'65766964656E63652FFF', X'65766964656E63652FEFBFBD')
+      `)
+      .get();
+    reader.close();
+    assert.equal(aliases.count, 1);
+    assert.equal(projection.audit(kernel.events()).ok, true);
+    projection.close();
+  } finally {
+    location.cleanup();
+  }
+});
+
+test('duplicate dependency byte aliases are removed during append repair', () => {
+  const location = temporaryDatabase();
+  try {
+    const kernel = new MemoryKernel();
+    const source = evidence('evidence/�', 'dependency alias sentinel');
+    kernel.captureEvidence(
+      { eventId: 'event/evidence/dependency-alias', recordedAt: 1, actor: 'human' },
+      source,
+    );
+    kernel.assertClaim(
+      { eventId: 'event/claim/dependency-alias', recordedAt: 2, actor: 'human' },
+      claim('claim/dependency-alias', source),
+      { authorizeImmediately: true },
+    );
+    const projection = new SqliteIncrementalFts5Projection({ database: location.database });
+    projection.rebuild(kernel.events());
+    const attacker = new DatabaseSync(location.database);
+    attacker
+      .prepare(`
+        INSERT INTO cl_incremental_dependencies (evidence_id, claim_id, bucket, generation)
+        SELECT CAST(X'65766964656E63652FFF' AS TEXT), claim_id, bucket, generation
+          FROM cl_incremental_dependencies
+         WHERE evidence_id = 'evidence/�' AND claim_id = 'claim/dependency-alias'
+      `)
+      .run();
+    attacker.close();
+
+    assert.equal(projection.audit(kernel.events()).ok, false);
+    const appended = evidence('evidence/dependency-alias-repair', 'dependency alias repair trigger');
+    kernel.captureEvidence(
+      { eventId: 'event/evidence/dependency-alias-repair', recordedAt: 3, actor: 'human' },
+      appended,
+    );
+    projection.update(kernel.events());
+    const reader = new DatabaseSync(location.database);
+    const aliases = reader
+      .prepare(`
+        SELECT COUNT(*) AS count
+          FROM cl_incremental_dependencies
+         WHERE claim_id = 'claim/dependency-alias'
+           AND CAST(evidence_id AS BLOB) IN (X'65766964656E63652FFF', X'65766964656E63652FEFBFBD')
+      `)
+      .get();
+    reader.close();
+    assert.equal(aliases.count, 1);
+    assert.equal(projection.audit(kernel.events()).ok, true);
+    projection.close();
+  } finally {
+    location.cleanup();
+  }
+});
+
+test('invalid UTF-8 event-prefix identities fail closed as canonical lineage corruption', () => {
+  const location = temporaryDatabase();
+  try {
+    const kernel = new MemoryKernel();
+    kernel.captureEvidence(
+      { eventId: 'event/�', recordedAt: 1, actor: 'human' },
+      evidence('evidence/event-encoding', 'event encoding sentinel'),
+    );
+    const projection = new SqliteIncrementalFts5Projection({ database: location.database });
+    projection.rebuild(kernel.events());
+    const attacker = new DatabaseSync(location.database);
+    attacker
+      .prepare(`
+        UPDATE cl_incremental_event_digests
+           SET event_id = CAST(X'6576656E742FFF' AS TEXT)
+         WHERE seq = 1
+      `)
+      .run();
+    attacker.close();
+
+    assert.equal(projection.audit(kernel.events()).ok, false);
+    kernel.captureEvidence(
+      { eventId: 'event/append-after-corruption', recordedAt: 2, actor: 'human' },
+      evidence('evidence/append-after-corruption', 'append after corruption'),
+    );
+    assert.throws(() => projection.update(kernel.events()), /fork detected at sequence 1/);
+    projection.close();
   } finally {
     location.cleanup();
   }

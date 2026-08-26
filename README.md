@@ -101,7 +101,7 @@ npm install
 npm test
 ```
 
-The test suite currently exercises 146 foundational, state, transition, and lexical-projection scenarios.
+The test suite currently exercises 159 foundational, state, transition, and lexical-projection scenarios.
 
 ## Documentation
 

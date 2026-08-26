@@ -144,40 +144,53 @@ interface StoredBucketRecord extends BucketRecord {
 interface MetaRow {
   readonly schema_version: number;
   readonly config_digest: string;
+  readonly config_digest_hex: string;
   readonly generation: number;
   readonly event_count: number;
   readonly last_seq: number;
   readonly last_recorded_at: number;
   readonly canonical_fingerprint: string;
+  readonly canonical_fingerprint_hex: string;
   readonly active_checkpoint_digest: string;
+  readonly active_checkpoint_digest_hex: string;
   readonly document_count: number;
   readonly dependency_count: number;
   readonly document_manifest_digest: string;
+  readonly document_manifest_digest_hex: string;
   readonly dependency_manifest_digest: string;
+  readonly dependency_manifest_digest_hex: string;
   readonly updated_at: number;
 }
 
 interface CheckpointRow {
   readonly generation: number;
   readonly previous_digest: string;
+  readonly previous_digest_hex: string;
   readonly checkpoint_digest: string;
+  readonly checkpoint_digest_hex: string;
   readonly base_event_count: number;
   readonly event_count: number;
   readonly append_from_seq: number;
   readonly append_to_seq: number;
   readonly append_digest: string;
+  readonly append_digest_hex: string;
   readonly canonical_fingerprint: string;
+  readonly canonical_fingerprint_hex: string;
   readonly last_seq: number;
   readonly last_recorded_at: number;
   readonly document_count: number;
   readonly dependency_count: number;
   readonly document_manifest_digest: string;
+  readonly document_manifest_digest_hex: string;
   readonly dependency_manifest_digest: string;
+  readonly dependency_manifest_digest_hex: string;
   readonly config_digest: string;
+  readonly config_digest_hex: string;
   readonly created_at: number;
 }
 
 interface StoredDocumentRow {
+  readonly rowid: unknown;
   readonly canonical_id: string;
   readonly kind: string;
   readonly scope: string;
@@ -185,34 +198,60 @@ interface StoredDocumentRow {
   readonly source_digest: string;
   readonly search_text: string;
   readonly entry_digest: string;
+  readonly canonical_id_hex: string;
+  readonly kind_hex: string;
+  readonly scope_hex: string;
+  readonly lifecycle_hex: string;
+  readonly source_digest_hex: string;
+  readonly search_text_hex: string;
+  readonly entry_digest_hex: string;
   readonly bucket: number;
   readonly generation: number;
 }
 
 interface StoredDependencyRow {
+  readonly rowid: unknown;
   readonly evidence_id: string;
   readonly claim_id: string;
+  readonly evidence_id_hex: string;
+  readonly claim_id_hex: string;
   readonly bucket: number;
   readonly generation: number;
 }
 
 interface StoredFtsRow {
+  readonly rowid: unknown;
   readonly canonical_id: string;
   readonly kind: string;
   readonly scope: string;
   readonly lifecycle: string;
   readonly entry_digest: string;
-  readonly generation: number;
+  readonly generation: unknown;
+  readonly generation_type: string;
+  readonly canonical_id_hex: string;
+  readonly kind_hex: string;
+  readonly scope_hex: string;
+  readonly lifecycle_hex: string;
+  readonly entry_digest_hex: string;
+  readonly search_text_hex: string;
   readonly search_text: string;
 }
 
 interface SearchRow {
+  readonly rowid: unknown;
   readonly canonical_id: string;
   readonly kind: string;
   readonly scope: string;
   readonly lifecycle: string;
   readonly entry_digest: string;
-  readonly generation: number;
+  readonly generation: unknown;
+  readonly generation_type: string;
+  readonly canonical_id_hex: string;
+  readonly kind_hex: string;
+  readonly scope_hex: string;
+  readonly lifecycle_hex: string;
+  readonly entry_digest_hex: string;
+  readonly search_text_hex: string;
   readonly search_text: string;
   readonly fts_score: number;
 }
@@ -259,20 +298,115 @@ function validateDigest(value: string, label: string): void {
   if (!SHA256_PATTERN.test(value)) throw new Error(`${label} is not a SHA-256 content address`);
 }
 
+function isWellFormedUnicode(value: string): boolean {
+  for (let index = 0; index < value.length; index += 1) {
+    const unit = value.charCodeAt(index);
+    if (unit >= 0xd800 && unit <= 0xdbff) {
+      const next = value.charCodeAt(index + 1);
+      if (next < 0xdc00 || next > 0xdfff) return false;
+      index += 1;
+      continue;
+    }
+    if (unit >= 0xdc00 && unit <= 0xdfff) return false;
+  }
+  return true;
+}
+
+function assertSqliteText(value: string, label: string): void {
+  if (value.includes('\u0000')) {
+    throw new Error(`${label} cannot contain U+0000`);
+  }
+  if (!isWellFormedUnicode(value)) {
+    throw new Error(`${label} must be well-formed Unicode`);
+  }
+}
+
+function utf8Hex(value: string): string {
+  return [...new TextEncoder().encode(value)]
+    .map((byte) => byte.toString(16).padStart(2, '0'))
+    .join('')
+    .toUpperCase();
+}
+
+function hasStoredRowid(value: unknown): value is number {
+  return typeof value === 'number' && Number.isSafeInteger(value) && value > 0;
+}
+
+function hasExactSqliteText(value: unknown, hex: unknown): value is string {
+  return typeof value === 'string' && typeof hex === 'string' && utf8Hex(value) === hex;
+}
+
+function hasExactDocumentTextEncoding(row: StoredDocumentRow): boolean {
+  return (
+    hasExactSqliteText(row.canonical_id, row.canonical_id_hex) &&
+    hasExactSqliteText(row.kind, row.kind_hex) &&
+    hasExactSqliteText(row.scope, row.scope_hex) &&
+    hasExactSqliteText(row.lifecycle, row.lifecycle_hex) &&
+    hasExactSqliteText(row.source_digest, row.source_digest_hex) &&
+    hasExactSqliteText(row.search_text, row.search_text_hex) &&
+    hasExactSqliteText(row.entry_digest, row.entry_digest_hex)
+  );
+}
+
+function hasExactDependencyTextEncoding(row: StoredDependencyRow): boolean {
+  return (
+    hasExactSqliteText(row.evidence_id, row.evidence_id_hex) &&
+    hasExactSqliteText(row.claim_id, row.claim_id_hex)
+  );
+}
+
+function hasExactFtsTextEncoding(row: StoredFtsRow | SearchRow): boolean {
+  return (
+    hasExactSqliteText(row.canonical_id, row.canonical_id_hex) &&
+    hasExactSqliteText(row.kind, row.kind_hex) &&
+    hasExactSqliteText(row.scope, row.scope_hex) &&
+    hasExactSqliteText(row.lifecycle, row.lifecycle_hex) &&
+    hasExactSqliteText(row.entry_digest, row.entry_digest_hex) &&
+    hasExactSqliteText(row.search_text, row.search_text_hex)
+  );
+}
+
+function hasExactMetadataTextEncoding(row: MetaRow): boolean {
+  return (
+    hasExactSqliteText(row.config_digest, row.config_digest_hex) &&
+    hasExactSqliteText(row.canonical_fingerprint, row.canonical_fingerprint_hex) &&
+    hasExactSqliteText(row.active_checkpoint_digest, row.active_checkpoint_digest_hex) &&
+    hasExactSqliteText(row.document_manifest_digest, row.document_manifest_digest_hex) &&
+    hasExactSqliteText(row.dependency_manifest_digest, row.dependency_manifest_digest_hex)
+  );
+}
+
+function hasExactCheckpointTextEncoding(row: CheckpointRow): boolean {
+  return (
+    hasExactSqliteText(row.previous_digest, row.previous_digest_hex) &&
+    hasExactSqliteText(row.checkpoint_digest, row.checkpoint_digest_hex) &&
+    hasExactSqliteText(row.append_digest, row.append_digest_hex) &&
+    hasExactSqliteText(row.canonical_fingerprint, row.canonical_fingerprint_hex) &&
+    hasExactSqliteText(row.document_manifest_digest, row.document_manifest_digest_hex) &&
+    hasExactSqliteText(row.dependency_manifest_digest, row.dependency_manifest_digest_hex) &&
+    hasExactSqliteText(row.config_digest, row.config_digest_hex)
+  );
+}
+
+function dependencyKey(evidenceId: string, claimId: string): string {
+  return stableJson([evidenceId, claimId]);
+}
+
 function snapshot(events: readonly MemoryEvent[]): CanonicalSnapshot {
   const canonicalEvents = MemoryKernel.from(events).events();
   return Object.freeze({
     events: canonicalEvents,
     fingerprint: fingerprintMemoryEvents(canonicalEvents),
     eventDigests: Object.freeze(
-      canonicalEvents.map((event) =>
-        Object.freeze({
+      canonicalEvents.map((event) => {
+        assertSqliteText(event.id, 'canonical event id');
+        return Object.freeze({
           seq: event.seq,
           eventId: event.id,
           recordedAt: event.recordedAt,
           digest: digest({ domain: 'cl-event-v1', event }),
-        }),
-      ),
+        });
+      }),
     ),
   });
 }
@@ -296,6 +430,9 @@ function normalizeDocument(value: unknown): ProjectionDocument {
   ) {
     throw new Error('canonical document has malformed identity, scope, digest, or text');
   }
+  assertSqliteText(document.canonicalId, 'canonical document id');
+  assertSqliteText(document.scope, 'canonical document scope');
+  assertSqliteText(document.searchText, 'canonical document search text');
   validateDigest(document.sourceDigest, 'canonical document source digest');
   const lifecycle =
     document.kind === 'claim'
@@ -406,7 +543,7 @@ function dependencyBuckets(
 ): readonly BucketRecord[] {
   const grouped = Array.from({ length: bucketCount }, () => [] as Dependency[]);
   for (const dependency of dependencies) {
-    const key = `${dependency.evidenceId}\u0000${dependency.claimId}`;
+    const key = dependencyKey(dependency.evidenceId, dependency.claimId);
     grouped[bucketFor(key, bucketCount)]?.push(dependency);
   }
   return Object.freeze(
@@ -879,10 +1016,22 @@ export class SqliteIncrementalFts5Projection {
   }
 
   #meta(): MetaRow | undefined {
-    const value = this.#db.prepare('SELECT * FROM cl_incremental_meta WHERE id = 1').get() as
-      | MetaRow
-      | undefined;
+    const value = this.#db
+      .prepare(`
+        SELECT *,
+               hex(config_digest) AS config_digest_hex,
+               hex(canonical_fingerprint) AS canonical_fingerprint_hex,
+               hex(active_checkpoint_digest) AS active_checkpoint_digest_hex,
+               hex(document_manifest_digest) AS document_manifest_digest_hex,
+               hex(dependency_manifest_digest) AS dependency_manifest_digest_hex
+          FROM cl_incremental_meta
+         WHERE id = 1
+      `)
+      .get() as MetaRow | undefined;
     if (value === undefined) return undefined;
+    if (!hasExactMetadataTextEncoding(value)) {
+      throw new Error('incremental metadata text encoding is non-canonical');
+    }
     if (value.schema_version !== SCHEMA_VERSION) {
       throw new Error(`unsupported incremental projection schema version: ${value.schema_version}`);
     }
@@ -912,9 +1061,24 @@ export class SqliteIncrementalFts5Projection {
 
   #checkpoint(generation: number): IncrementalProjectionCheckpoint | undefined {
     const row = this.#db
-      .prepare('SELECT * FROM cl_incremental_checkpoints WHERE generation = ?')
+      .prepare(`
+        SELECT *,
+               hex(previous_digest) AS previous_digest_hex,
+               hex(checkpoint_digest) AS checkpoint_digest_hex,
+               hex(append_digest) AS append_digest_hex,
+               hex(canonical_fingerprint) AS canonical_fingerprint_hex,
+               hex(document_manifest_digest) AS document_manifest_digest_hex,
+               hex(dependency_manifest_digest) AS dependency_manifest_digest_hex,
+               hex(config_digest) AS config_digest_hex
+          FROM cl_incremental_checkpoints
+         WHERE generation = ?
+      `)
       .get(generation) as CheckpointRow | undefined;
-    return row === undefined ? undefined : checkpointFromRow(row);
+    if (row === undefined) return undefined;
+    if (!hasExactCheckpointTextEncoding(row)) {
+      throw new Error(`incremental checkpoint ${generation} text encoding is non-canonical`);
+    }
+    return checkpointFromRow(row);
   }
 
   #verifyStoredHead(meta: MetaRow): IncrementalProjectionCheckpoint {
@@ -965,21 +1129,46 @@ export class SqliteIncrementalFts5Projection {
 
   #storedDocuments(): readonly StoredDocumentRow[] {
     return this.#db
-      .prepare(`SELECT * FROM cl_incremental_documents ORDER BY kind, canonical_id`)
+      .prepare(`
+        SELECT rowid, canonical_id, kind, scope, lifecycle, source_digest, search_text,
+               entry_digest, bucket, generation,
+               hex(canonical_id) AS canonical_id_hex,
+               hex(kind) AS kind_hex,
+               hex(scope) AS scope_hex,
+               hex(lifecycle) AS lifecycle_hex,
+               hex(source_digest) AS source_digest_hex,
+               hex(search_text) AS search_text_hex,
+               hex(entry_digest) AS entry_digest_hex
+          FROM cl_incremental_documents
+         ORDER BY kind, canonical_id, rowid
+      `)
       .all() as unknown as readonly StoredDocumentRow[];
   }
 
   #storedDependencies(): readonly StoredDependencyRow[] {
     return this.#db
-      .prepare(`SELECT * FROM cl_incremental_dependencies ORDER BY evidence_id, claim_id`)
+      .prepare(`
+        SELECT rowid, evidence_id, claim_id, bucket, generation,
+               hex(evidence_id) AS evidence_id_hex,
+               hex(claim_id) AS claim_id_hex
+          FROM cl_incremental_dependencies
+         ORDER BY evidence_id, claim_id, rowid
+      `)
       .all() as unknown as readonly StoredDependencyRow[];
   }
 
   #storedFtsRows(): readonly StoredFtsRow[] {
     return this.#db
       .prepare(`
-        SELECT canonical_id, kind, scope, lifecycle, entry_digest,
-               CAST(generation AS INTEGER) AS generation, search_text
+        SELECT rowid, canonical_id, kind, scope, lifecycle, entry_digest, generation,
+               typeof(generation) AS generation_type,
+               hex(canonical_id) AS canonical_id_hex,
+               hex(kind) AS kind_hex,
+               hex(scope) AS scope_hex,
+               hex(lifecycle) AS lifecycle_hex,
+               hex(entry_digest) AS entry_digest_hex,
+               hex(search_text) AS search_text_hex,
+               search_text
           FROM cl_incremental_fts
          ORDER BY kind, canonical_id
       `)
@@ -992,7 +1181,9 @@ export class SqliteIncrementalFts5Projection {
     }
     const rows = this.#db
       .prepare(`
-        SELECT seq, event_id, recorded_at, event_digest
+        SELECT seq, event_id, recorded_at, event_digest,
+               hex(event_id) AS event_id_hex,
+               hex(event_digest) AS event_digest_hex
           FROM cl_incremental_event_digests
          WHERE seq <= ?
          ORDER BY seq
@@ -1002,6 +1193,8 @@ export class SqliteIncrementalFts5Projection {
       readonly event_id: string;
       readonly recorded_at: number;
       readonly event_digest: string;
+      readonly event_id_hex: string;
+      readonly event_digest_hex: string;
     }[];
     if (rows.length !== meta.event_count) throw new Error('incremental event-prefix rows are incomplete');
     for (let index = 0; index < rows.length; index += 1) {
@@ -1011,6 +1204,8 @@ export class SqliteIncrementalFts5Projection {
         row === undefined ||
         expected === undefined ||
         row.seq !== expected.seq ||
+        !hasExactSqliteText(row.event_id, row.event_id_hex) ||
+        !hasExactSqliteText(row.event_digest, row.event_digest_hex) ||
         row.event_id !== expected.eventId ||
         row.recorded_at !== expected.recordedAt ||
         row.event_digest !== expected.digest
@@ -1024,12 +1219,13 @@ export class SqliteIncrementalFts5Projection {
     const expected = new Map(
       documents.map((document) => [docKey(document.kind, document.canonicalId), document]),
     );
-    const existingDocuments = new Map(
-      this.#storedDocuments().map((row) => [
-        docKey(row.kind as ProjectionDocument['kind'], row.canonical_id),
-        row,
-      ]),
-    );
+    const existingDocuments = new Map<string, StoredDocumentRow[]>();
+    for (const row of this.#storedDocuments()) {
+      const key = docKey(row.kind as ProjectionDocument['kind'], row.canonical_id);
+      const rows = existingDocuments.get(key) ?? [];
+      rows.push(row);
+      existingDocuments.set(key, rows);
+    }
     const existingFts = new Map<string, StoredFtsRow[]>();
     for (const row of this.#storedFtsRows()) {
       const key = docKey(row.kind as ProjectionDocument['kind'], row.canonical_id);
@@ -1038,12 +1234,26 @@ export class SqliteIncrementalFts5Projection {
       existingFts.set(key, rows);
     }
 
-    const removeDocument = this.#db.prepare(
-      'DELETE FROM cl_incremental_documents WHERE kind = ? AND canonical_id = ?',
+    const removeDocumentRow = this.#db.prepare(
+      'DELETE FROM cl_incremental_documents WHERE rowid = ?',
     );
-    const removeFts = this.#db.prepare(
-      'DELETE FROM cl_incremental_fts WHERE kind = ? AND canonical_id = ?',
+    const deleteDocumentRow = (row: StoredDocumentRow): void => {
+      if (!hasStoredRowid(row.rowid)) {
+        throw new Error('incremental document row has a malformed rowid');
+      }
+      removeDocumentRow.run(row.rowid);
+    };
+    const removeFtsRow = this.#db.prepare(
+      'DELETE FROM cl_incremental_fts WHERE rowid = ?',
     );
+    const deleteFtsRows = (rows: readonly StoredFtsRow[]): void => {
+      for (const row of rows) {
+        if (!hasStoredRowid(row.rowid)) {
+          throw new Error('incremental FTS row has a malformed rowid');
+        }
+        removeFtsRow.run(row.rowid);
+      }
+    };
     const insertDocument = this.#db.prepare(`
       INSERT INTO cl_incremental_documents
         (canonical_id, kind, scope, lifecycle, source_digest, search_text, entry_digest, bucket, generation)
@@ -1058,23 +1268,22 @@ export class SqliteIncrementalFts5Projection {
     const allKeys = new Set([...existingDocuments.keys(), ...existingFts.keys()]);
     for (const key of allKeys) {
       if (expected.has(key)) continue;
-      const documentRow = existingDocuments.get(key);
-      const ftsRow = existingFts.get(key)?.[0];
-      const kind = documentRow?.kind ?? ftsRow?.kind;
-      const canonicalId = documentRow?.canonical_id ?? ftsRow?.canonical_id;
-      if (kind !== undefined && canonicalId !== undefined) {
-        removeDocument.run(kind, canonicalId);
-        removeFts.run(kind, canonicalId);
-      }
+      const documentRows = existingDocuments.get(key) ?? [];
+      for (const row of documentRows) deleteDocumentRow(row);
+      deleteFtsRows(existingFts.get(key) ?? []);
     }
 
     for (const [key, document] of expected) {
       const lifecycle = document.lifecycle ?? '';
       const bucket = bucketFor(key, this.#bucketCount);
-      const documentRow = existingDocuments.get(key);
+      const documentRows = existingDocuments.get(key) ?? [];
+      const documentRow = documentRows[0];
       const ftsRows = existingFts.get(key) ?? [];
       const documentMatches =
+        documentRows.length === 1 &&
         documentRow !== undefined &&
+        hasStoredRowid(documentRow.rowid) &&
+        hasExactDocumentTextEncoding(documentRow) &&
         documentRow.kind === document.kind &&
         documentRow.canonical_id === document.canonicalId &&
         documentRow.scope === document.scope &&
@@ -1096,13 +1305,18 @@ export class SqliteIncrementalFts5Projection {
         ftsRow.lifecycle === lifecycle &&
         ftsRow.entry_digest === document.entryDigest &&
         ftsRow.search_text === document.searchText &&
+        hasStoredRowid(ftsRow.rowid) &&
+        (ftsRow.generation_type === 'integer' || ftsRow.generation_type === 'real') &&
+        hasExactFtsTextEncoding(ftsRow) &&
+        typeof ftsRow.generation === 'number' &&
+        Number.isSafeInteger(ftsRow.generation) &&
         documentRow !== undefined &&
         ftsRow.generation === documentRow.generation;
 
       if (documentMatches && ftsMatches) continue;
 
-      removeDocument.run(document.kind, document.canonicalId);
-      removeFts.run(document.kind, document.canonicalId);
+      for (const row of documentRows) deleteDocumentRow(row);
+      deleteFtsRows(ftsRows);
       insertDocument.run(
         document.canonicalId,
         document.kind,
@@ -1129,21 +1343,30 @@ export class SqliteIncrementalFts5Projection {
   #writeDependencies(dependencies: readonly Dependency[], generation: number): void {
     const expected = new Map(
       dependencies.map((item) => [
-        `${item.evidenceId}\u0000${item.claimId}`,
+        dependencyKey(item.evidenceId, item.claimId),
         item,
       ]),
     );
-    const existing = new Map(
-      this.#storedDependencies().map((row) => [
-        `${row.evidence_id}\u0000${row.claim_id}`,
-        row,
-      ]),
-    );
+    const existing = new Map<string, StoredDependencyRow[]>();
+    for (const row of this.#storedDependencies()) {
+      const key = dependencyKey(row.evidence_id, row.claim_id);
+      const rows = existing.get(key) ?? [];
+      rows.push(row);
+      existing.set(key, rows);
+    }
     const remove = this.#db.prepare(
-      'DELETE FROM cl_incremental_dependencies WHERE evidence_id = ? AND claim_id = ?',
+      'DELETE FROM cl_incremental_dependencies WHERE rowid = ?',
     );
-    for (const [key, row] of existing) {
-      if (!expected.has(key)) remove.run(row.evidence_id, row.claim_id);
+    const deleteDependencyRow = (row: StoredDependencyRow): void => {
+      if (!hasStoredRowid(row.rowid)) {
+        throw new Error('incremental dependency row has a malformed rowid');
+      }
+      remove.run(row.rowid);
+    };
+    for (const [key, rows] of existing) {
+      if (!expected.has(key)) {
+        for (const row of rows) deleteDependencyRow(row);
+      }
     }
     const insert = this.#db.prepare(`
       INSERT INTO cl_incremental_dependencies (evidence_id, claim_id, bucket, generation)
@@ -1153,9 +1376,13 @@ export class SqliteIncrementalFts5Projection {
     `);
     for (const [key, dependency] of expected) {
       const bucket = bucketFor(key, this.#bucketCount);
-      const row = existing.get(key);
+      const rows = existing.get(key) ?? [];
+      const row = rows[0];
       if (
+        rows.length === 1 &&
         row !== undefined &&
+        hasStoredRowid(row.rowid) &&
+        hasExactDependencyTextEncoding(row) &&
         row.bucket === bucket &&
         Number.isSafeInteger(row.generation) &&
         row.generation > 0 &&
@@ -1163,6 +1390,7 @@ export class SqliteIncrementalFts5Projection {
       ) {
         continue;
       }
+      for (const stored of rows) deleteDependencyRow(stored);
       insert.run(dependency.evidenceId, dependency.claimId, bucket, generation);
     }
   }
@@ -1382,7 +1610,8 @@ export class SqliteIncrementalFts5Projection {
   ): readonly StoredBucketRecord[] {
     const rows = this.#db
       .prepare(`
-        SELECT bucket, item_count, bucket_digest, generation
+        SELECT bucket, item_count, bucket_digest, generation,
+               hex(bucket_digest) AS bucket_digest_hex
           FROM cl_incremental_buckets
          WHERE manifest_kind = ?
          ORDER BY bucket
@@ -1391,6 +1620,7 @@ export class SqliteIncrementalFts5Projection {
       readonly bucket: number;
       readonly item_count: number;
       readonly bucket_digest: string;
+      readonly bucket_digest_hex: string;
       readonly generation: number;
     }[];
     if (rows.length !== this.#bucketCount) {
@@ -1406,6 +1636,9 @@ export class SqliteIncrementalFts5Projection {
           row.generation !== expectedGeneration
         ) {
           throw new Error(`${kind} bucket metadata or generation is malformed`);
+        }
+        if (!hasExactSqliteText(row.bucket_digest, row.bucket_digest_hex)) {
+          throw new Error(`${kind} bucket digest encoding is non-canonical`);
         }
         validateDigest(row.bucket_digest, `${kind} bucket digest`);
         return Object.freeze({
@@ -1500,19 +1733,25 @@ export class SqliteIncrementalFts5Projection {
         lifecycle === 'active-only' ? "AND (kind <> 'claim' OR lifecycle = 'active')" : '';
       const rows = this.#db
         .prepare(`
-          SELECT canonical_id, kind, scope, lifecycle, entry_digest,
-                 CAST(generation AS INTEGER) AS generation, search_text,
-                 bm25(cl_incremental_fts) AS fts_score
+          SELECT rowid, canonical_id, kind, scope, lifecycle, entry_digest, generation,
+                 typeof(generation) AS generation_type,
+                 hex(canonical_id) AS canonical_id_hex,
+                 hex(kind) AS kind_hex,
+                 hex(scope) AS scope_hex,
+                 hex(lifecycle) AS lifecycle_hex,
+                 hex(entry_digest) AS entry_digest_hex,
+                 hex(search_text) AS search_text_hex,
+                 search_text, bm25(cl_incremental_fts) AS fts_score
             FROM cl_incremental_fts
            WHERE cl_incremental_fts MATCH ?
              AND scope IN (${placeholders})
              ${lifecycleClause}
-           ORDER BY fts_score ASC, kind ASC, canonical_id ASC
+           ORDER BY fts_score ASC, kind ASC, canonical_id ASC, rowid ASC
            LIMIT ?
         `)
-        .all(match, ...scopeChain, limit) as unknown as readonly SearchRow[];
-      return Object.freeze(
-        rows.map((row, index) => {
+        .all(match, ...scopeChain, limit + 1) as unknown as readonly SearchRow[];
+      const seen = new Set<string>();
+      const verified = rows.map((row, index) => {
           if (row.kind !== 'evidence' && row.kind !== 'claim') {
             throw new Error('incremental FTS row has an unknown kind');
           }
@@ -1530,22 +1769,35 @@ export class SqliteIncrementalFts5Projection {
           if (!SHA256_PATTERN.test(row.entry_digest)) {
             throw new Error('incremental FTS row has a malformed entry digest');
           }
+          if (
+            !hasStoredRowid(row.rowid) ||
+            (row.generation_type !== 'integer' && row.generation_type !== 'real') ||
+            !hasExactFtsTextEncoding(row) ||
+            typeof row.generation !== 'number' ||
+            !Number.isSafeInteger(row.generation)
+          ) {
+            throw new Error('incremental FTS row has malformed raw SQLite metadata');
+          }
+          const identity = docKey(row.kind, row.canonical_id);
+          if (seen.has(identity)) {
+            throw new Error(`duplicate incremental FTS row: ${row.kind}/${row.canonical_id}`);
+          }
+          seen.add(identity);
           const canonical = this.#db
             .prepare(`
-              SELECT scope, lifecycle, source_digest, entry_digest, generation, search_text
+              SELECT rowid, canonical_id, kind, scope, lifecycle, source_digest, entry_digest,
+                     generation, search_text,
+                     hex(canonical_id) AS canonical_id_hex,
+                     hex(kind) AS kind_hex,
+                     hex(scope) AS scope_hex,
+                     hex(lifecycle) AS lifecycle_hex,
+                     hex(source_digest) AS source_digest_hex,
+                     hex(search_text) AS search_text_hex,
+                     hex(entry_digest) AS entry_digest_hex
                 FROM cl_incremental_documents
                WHERE kind = ? AND canonical_id = ?
             `)
-            .get(row.kind, row.canonical_id) as
-            | {
-                readonly scope: string;
-                readonly lifecycle: string;
-                readonly source_digest: string;
-                readonly entry_digest: string;
-                readonly generation: number;
-                readonly search_text: string;
-              }
-            | undefined;
+            .get(row.kind, row.canonical_id) as StoredDocumentRow | undefined;
           const storedLifecycle =
             canonical === undefined
               ? undefined
@@ -1569,6 +1821,8 @@ export class SqliteIncrementalFts5Projection {
                 });
           if (
             canonical === undefined ||
+            !hasStoredRowid(canonical.rowid) ||
+            !hasExactDocumentTextEncoding(canonical) ||
             canonicalBase === undefined ||
             canonical.scope !== row.scope ||
             canonical.lifecycle !== row.lifecycle ||
@@ -1576,7 +1830,6 @@ export class SqliteIncrementalFts5Projection {
             canonical.search_text !== row.search_text ||
             canonical.generation !== row.generation ||
             documentDigest(canonicalBase) !== canonical.entry_digest ||
-            !Number.isSafeInteger(row.generation) ||
             row.generation <= 0 ||
             row.generation > checkpoint.generation
           ) {
@@ -1602,8 +1855,8 @@ export class SqliteIncrementalFts5Projection {
             canonicalFingerprint: checkpoint.canonicalFingerprint,
             generation: checkpoint.generation,
           });
-        }),
-      );
+        });
+      return Object.freeze(verified.slice(0, limit));
     });
   }
 
@@ -1741,6 +1994,8 @@ export class SqliteIncrementalFts5Projection {
         const expected = expectedDocumentMap.get(key);
         if (
           expected === undefined ||
+          !hasStoredRowid(row.rowid) ||
+          !hasExactDocumentTextEncoding(row) ||
           expected.scope !== row.scope ||
           (expected.lifecycle ?? '') !== row.lifecycle ||
           expected.sourceDigest !== row.source_digest ||
@@ -1776,6 +2031,11 @@ export class SqliteIncrementalFts5Projection {
           stored.scope !== row.scope ||
           stored.lifecycle !== row.lifecycle ||
           stored.entry_digest !== row.entry_digest ||
+          !hasStoredRowid(row.rowid) ||
+          (row.generation_type !== 'integer' && row.generation_type !== 'real') ||
+          !hasExactFtsTextEncoding(row) ||
+          typeof row.generation !== 'number' ||
+          !Number.isSafeInteger(row.generation) ||
           stored.generation !== row.generation ||
           stored.search_text !== row.search_text
         ) {
@@ -1794,7 +2054,7 @@ export class SqliteIncrementalFts5Projection {
 
       const expectedDependencyMap = new Map(
         expectedDependencies.map((item) => [
-          `${item.evidenceId}\u0000${item.claimId}`,
+          dependencyKey(item.evidenceId, item.claimId),
           item,
         ]),
       );
@@ -1803,10 +2063,12 @@ export class SqliteIncrementalFts5Projection {
         errors.push('reverse dependency count differs from canonical projection');
       }
       for (const row of storedDependencies) {
-        const key = `${row.evidence_id}\u0000${row.claim_id}`;
+        const key = dependencyKey(row.evidence_id, row.claim_id);
         const expected = expectedDependencyMap.get(key);
         if (
           expected === undefined ||
+          !hasStoredRowid(row.rowid) ||
+          !hasExactDependencyTextEncoding(row) ||
           row.bucket !== bucketFor(key, this.#bucketCount) ||
           !Number.isSafeInteger(row.generation) ||
           row.generation <= 0 ||
@@ -1818,7 +2080,9 @@ export class SqliteIncrementalFts5Projection {
 
       const eventRows = this.#db
         .prepare(`
-          SELECT seq, event_id, recorded_at, event_digest
+          SELECT seq, event_id, recorded_at, event_digest,
+                 hex(event_id) AS event_id_hex,
+                 hex(event_digest) AS event_digest_hex
             FROM cl_incremental_event_digests
            ORDER BY seq
         `)
@@ -1827,6 +2091,8 @@ export class SqliteIncrementalFts5Projection {
         readonly event_id: string;
         readonly recorded_at: number;
         readonly event_digest: string;
+        readonly event_id_hex: string;
+        readonly event_digest_hex: string;
       }[];
       if (eventRows.length !== current.eventDigests.length) {
         errors.push('event-prefix digest row count is incorrect');
@@ -1838,6 +2104,8 @@ export class SqliteIncrementalFts5Projection {
           expected === undefined ||
           row === undefined ||
           expected.seq !== row.seq ||
+          !hasExactSqliteText(row.event_id, row.event_id_hex) ||
+          !hasExactSqliteText(row.event_digest, row.event_digest_hex) ||
           expected.eventId !== row.event_id ||
           expected.recordedAt !== row.recorded_at ||
           expected.digest !== row.event_digest
@@ -1848,7 +2116,18 @@ export class SqliteIncrementalFts5Projection {
       }
 
       const checkpointRows = this.#db
-        .prepare(`SELECT * FROM cl_incremental_checkpoints ORDER BY generation`)
+        .prepare(`
+          SELECT *,
+                 hex(previous_digest) AS previous_digest_hex,
+                 hex(checkpoint_digest) AS checkpoint_digest_hex,
+                 hex(append_digest) AS append_digest_hex,
+                 hex(canonical_fingerprint) AS canonical_fingerprint_hex,
+                 hex(document_manifest_digest) AS document_manifest_digest_hex,
+                 hex(dependency_manifest_digest) AS dependency_manifest_digest_hex,
+                 hex(config_digest) AS config_digest_hex
+            FROM cl_incremental_checkpoints
+           ORDER BY generation
+        `)
         .all() as unknown as readonly CheckpointRow[];
       if (activeGeneration !== undefined && checkpointRows.length !== activeGeneration) {
         errors.push('checkpoint table contains missing or future generations');
@@ -1859,7 +2138,11 @@ export class SqliteIncrementalFts5Projection {
       let latest: IncrementalProjectionCheckpoint | undefined;
       for (let index = 0; index < checkpointRows.length; index += 1) {
         try {
-          const item = checkpointFromRow(checkpointRows[index] as CheckpointRow);
+          const row = checkpointRows[index] as CheckpointRow;
+          if (!hasExactCheckpointTextEncoding(row)) {
+            throw new Error('text encoding is non-canonical');
+          }
+          const item = checkpointFromRow(row);
           verifyCheckpointDigest(item, `checkpoint ${item.generation}`);
           if (item.generation !== index + 1) {
             errors.push('checkpoint generations are not contiguous');

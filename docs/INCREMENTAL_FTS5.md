@@ -126,6 +126,10 @@ A lexical miss remains **not evidence of absence**.
 
 The adapter uses strict SQLite tables, `trusted_schema = OFF`, WAL, full synchronous durability, bounded busy timeout, parameterized values, and parser-produced FTS queries.
 
+Node's SQLite text boundary does not safely round-trip embedded `U+0000` and replaces malformed UTF-8 during decoding. Canonical event identifiers and indexed document identifiers, scopes, or search text containing `U+0000` are therefore rejected before publication; ill-formed Unicode search text is rejected at the same boundary.
+
+Every stored text value used for identity or integrity is compared with `hex(...)` over its raw SQLite bytes. That includes documents, FTS rows, reverse dependencies, event-prefix rows, bucket digests, active metadata, and checkpoint lineage. Malformed generations, non-canonical UTF-8, NUL-suffixed values, and duplicate decoded identities therefore fail closed instead of being normalized into apparently valid metadata. Repairable document, FTS, and dependency corruption is removed by SQLite `rowid`, so malformed byte aliases cannot evade deletion through decoded-key collisions.
+
 A partially created or column-incompatible incremental schema is discarded before first use. Explicit rebuild is the recovery path for document, FTS, dependency, bucket, or privacy-configuration repair. A corrupt checkpoint/event-prefix lineage fails closed; the host must discard the disposable database and rebuild it from trusted canonical memory.
 
 ## Complexity boundary
