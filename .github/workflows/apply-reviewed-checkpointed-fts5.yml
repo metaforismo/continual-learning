@@ -1,0 +1,81 @@
+name: Apply reviewed checkpointed FTS5 (temporary)
+
+on:
+  push:
+    branches:
+      - feat/checkpointed-fts5-diff-v1
+
+permissions:
+  contents: write
+
+concurrency:
+  group: apply-reviewed-checkpointed-fts5
+  cancel-in-progress: false
+
+jobs:
+  apply:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: feat/checkpointed-fts5-diff-v1
+          fetch-depth: 0
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22.16.0
+          cache: npm
+
+      - name: Materialize reviewed files
+        shell: bash
+        run: |
+          set -euo pipefail
+          cat .tmp/reviewed-upload/chunk-* > /tmp/reviewed.b64
+          base64 -d /tmp/reviewed.b64 > /tmp/reviewed.tar.gz
+          echo '75306232cfbad493e9ee698b0c743f54ad542e3c02244f433f7f477cb25f13b2  /tmp/reviewed.tar.gz' | sha256sum -c -
+          tar -xzf /tmp/reviewed.tar.gz
+          rm -rf .tmp/reviewed-upload
+          rm .github/workflows/apply-reviewed-checkpointed-fts5.yml
+
+      - name: Verify exact reviewed tree on minimum runtime
+        shell: bash
+        run: |
+          set -euo pipefail
+          git fetch origin main
+          expected=$(printf '%s\n' \
+            AGENTS.md \
+            README.md \
+            docs/INCREMENTAL_FTS5.md \
+            docs/ROADMAP.md \
+            src/retrieval/incremental.ts \
+            src/retrieval/index.ts \
+            test/incremental-projection.test.mjs | sort)
+          actual=$(git diff --name-only origin/main -- | sort)
+          if [[ "$actual" != "$expected" ]]; then
+            echo 'Unexpected final diff:'
+            printf '%s\n' "$actual"
+            exit 1
+          fi
+          git diff --check origin/main --
+          npm ci --ignore-scripts --no-audit --no-fund
+          npm run check
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          check-latest: true
+          cache: npm
+
+      - name: Verify latest Node 22
+        run: npm run check
+
+      - name: Commit reviewed tree
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name metaforismo
+          git config user.email 39646696+metaforismo@users.noreply.github.com
+          git add -A
+          git commit -m 'feat: add checkpointed FTS5 diff publication'
+          git push origin HEAD:feat/checkpointed-fts5-diff-v1
