@@ -1,0 +1,224 @@
+name: Finalize canonical change feed (temporary)
+
+on:
+  push:
+    branches:
+      - feat/canonical-cursor-v1
+
+permissions:
+  contents: write
+  pull-requests: write
+  checks: read
+
+concurrency:
+  group: canonical-change-feed-final
+  cancel-in-progress: true
+
+jobs:
+  finalize:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: feat/canonical-cursor-v1
+          fetch-depth: 0
+
+      - name: Align with current main and require durable ledger foundation
+        run: |
+          git fetch origin main
+          git merge --no-edit origin/main
+          test -f src/durable/canonical-ledger.ts
+          test -f docs/DURABLE_CANONICAL_LEDGER.md
+          test -f src/durable/change-feed.ts
+          test -f test/canonical-change-feed.test.mjs
+
+      - name: Apply reviewed cursor hardening and documentation wiring
+        shell: bash
+        run: |
+          set -euo pipefail
+          python <<'PY'
+          from pathlib import Path
+
+          path = Path('src/durable/change-feed.ts')
+          text = path.read_text()
+
+          old = '''function deepFreeze<T>(value: T): T {
+  if (value !== null && typeof value === 'object' && !Object.isFrozen(value)) {
+    for (const child of Object.values(value as Record<string, unknown>)) deepFreeze(child);
+    Object.freeze(value);
+  }
+  return value;
+}'''
+          new = '''function deepFreeze<T>(value: T): T {
+  if (value !== null && typeof value === 'object' && !Object.isFrozen(value)) {
+    const objectValue = value as unknown as Record<string, unknown>;
+    for (const child of Object.values(objectValue)) deepFreeze(child);
+    Object.freeze(value);
+  }
+  return value;
+}'''
+          if old not in text:
+              raise SystemExit('missing deepFreeze block')
+          text = text.replace(old, new, 1)
+
+          old = '''    let verified = Object.freeze({
+      schemaVersion: CHANGE_FEED_SCHEMA_VERSION,
+      eventCount: 0,
+      lastSeq: 0,
+      lastRecordedAt: 0,
+      chainDigest: GENESIS_CHAIN_DIGEST,
+    }) satisfies CanonicalReadCursor;'''
+          new = '''    let verified: CanonicalReadCursor = Object.freeze({
+      schemaVersion: CHANGE_FEED_SCHEMA_VERSION,
+      eventCount: 0,
+      lastSeq: 0,
+      lastRecordedAt: 0,
+      chainDigest: GENESIS_CHAIN_DIGEST,
+    });'''
+          if old not in text:
+              raise SystemExit('missing typed checkpoint initialization')
+          text = text.replace(old, new, 1)
+
+          old = '''    if (
+      durableTail.eventCount === this.#checkpoint.eventCount &&
+      durableTail.chainDigest !== this.#checkpoint.chainDigest
+    ) {
+      throw new Error('durable ledger forked at the change-feed checkpoint');
+    }'''
+          new = '''    if (
+      durableTail.eventCount === this.#checkpoint.eventCount &&
+      !sameCursor(durableTail, this.#checkpoint)
+    ) {
+      throw new Error('durable ledger forked or changed metadata at the change-feed checkpoint');
+    }'''
+          if old not in text:
+              raise SystemExit('missing change-feed status equality block')
+          text = text.replace(old, new, 1)
+          path.write_text(text)
+
+          durable_index = Path('src/durable/index.ts')
+          index_text = durable_index.read_text()
+          export = "export * from './change-feed.js';\n"
+          if export not in index_text:
+              durable_index.write_text(index_text + export)
+
+          readme = Path('README.md')
+          readme_text = readme.read_text()
+          marker = '- [Durable canonical ledger](docs/DURABLE_CANONICAL_LEDGER.md)'
+          line = '- [Canonical change feed](docs/CANONICAL_CHANGE_FEED.md)'
+          if line not in readme_text:
+              if marker in readme_text:
+                  readme_text = readme_text.replace(marker, marker + '\n' + line, 1)
+              else:
+                  readme_text += '\n' + line + '\n'
+          implementation_marker = '- an atomic SQLite canonical event-byte ledger with event/receipt hash chains, idempotent receipts, audit records, and whole-ledger cursor CAS;'
+          implementation_line = '- a verified pull-based canonical change feed with O(N) startup/resume verification and O(k) live complete-delta polling;'
+          if implementation_line not in readme_text and implementation_marker in readme_text:
+              readme_text = readme_text.replace(
+                  implementation_marker,
+                  implementation_marker + '\n' + implementation_line,
+                  1,
+              )
+          readme.write_text(readme_text)
+
+          roadmap = Path('docs/ROADMAP.md')
+          roadmap_text = roadmap.read_text()
+          marker = '- [x] atomic SQLite canonical event-byte ledger, audit records, idempotent receipts, and whole-ledger cursor CAS;'
+          line = '- [x] verified canonical change feed for persisted consumer checkpoints and O(k) live delta polling;'
+          if line not in roadmap_text:
+              if marker in roadmap_text:
+                  roadmap_text = roadmap_text.replace(marker, marker + '\n' + line, 1)
+              else:
+                  roadmap_text += '\n' + line + '\n'
+          roadmap.write_text(roadmap_text)
+
+          agents = Path('AGENTS.md')
+          agents_text = agents.read_text()
+          invariant = '- Canonical change-feed polling never advances a consumer checkpoint before the exact issued batch is acknowledged; startup/resume and live-delta costs must be reported separately.'
+          if invariant not in agents_text:
+              marker = '- Durable canonical publication must atomically commit event bytes, transition audit, receipt, and cursor metadata; an index or receipt is never a second source of truth.'
+              if marker in agents_text:
+                  agents_text = agents_text.replace(marker, marker + '\n' + invariant, 1)
+              else:
+                  agents_text += '\n' + invariant + '\n'
+          agents.write_text(agents_text)
+          PY
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22.16.0
+          cache: npm
+      - name: Verify minimum runtime
+        run: |
+          npm ci --ignore-scripts --no-audit --no-fund
+          npm run check
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          check-latest: true
+          cache: npm
+      - name: Verify latest runtime and exact security boundary
+        shell: bash
+        run: |
+          npm run check
+          git diff --check
+          git fetch origin main
+          files=$(git diff --name-only origin/main...HEAD)
+          printf '%s\n' "$files"
+          ! git diff origin/main...HEAD -- src/durable/change-feed.ts | grep -E 'child_process|spawn\(|execFile|https?://|process\.env|load_extension|ATTACH DATABASE|writable_schema'
+          ! printf '%s\n' "$files" | grep -E 'debug_report|\.sqlite($|-)|\.db$|(^|/)(dist|node_modules)/'
+
+      - name: Publish clean product head
+        run: |
+          rm -f .github/workflows/finalize-canonical-change-feed.yml
+          git config user.name metaforismo
+          git config user.email 39646696+metaforismo@users.noreply.github.com
+          git add -A
+          git commit -m "feat: add verified canonical change feed"
+          git push origin HEAD:feat/canonical-cursor-v1
+
+      - name: Open PR, wait for clean-head CI, and merge only on green
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          number=$(gh pr list --head feat/canonical-cursor-v1 --base main --state open --json number --jq '.[0].number // empty')
+          body=$(mktemp)
+          cat > "$body" <<'EOF'
+          ## Summary
+
+          Adds a verified pull-based change feed over the durable canonical ledger.
+
+          ## Contract
+
+          - default O(N) full-audit startup and persisted-checkpoint verification;
+          - O(k) live polling of the exact complete delta since the consumer checkpoint;
+          - bounded lag budget with explicit failure rather than silent truncation;
+          - canonical event-chain recomputation to the durable tail;
+          - deep-frozen process-local batch capabilities;
+          - `poll -> consumer transaction -> ack` semantics;
+          - retry without checkpoint advancement;
+          - restart from a persisted read cursor;
+          - explicit `tail-only` operational mode that does not claim historical integrity.
+
+          ## Verification
+
+          Exact product head is admitted only after strict TypeScript build and the complete suite pass on Node 22.16.0 and latest Node 22, followed by permanent PR CI.
+
+          ## Explicit limits
+
+          This optimizes downstream live consumption, not canonical mutation or transition verification. Startup/resume remains O(N), a complete delta is capped at 1,000 events, and there are no external signatures, distributed offsets, infinite-context, or solved-continual-learning claims.
+          EOF
+          if [ -z "$number" ]; then
+            url=$(gh pr create --draft --base main --head feat/canonical-cursor-v1 --title "feat: add verified canonical change feed" --body-file "$body")
+            number=${url##*/}
+          else
+            gh pr edit "$number" --title "feat: add verified canonical change feed" --body-file "$body"
+          fi
+          gh pr ready "$number" || true
+          sleep 10
+          gh pr checks "$number" --watch --fail-fast
+          gh pr merge "$number" --squash --delete-branch --subject "feat: add verified canonical change feed (#$number)" --body "Add O(N)-verified startup/resume and O(k) complete-delta live polling with process-local two-phase batch acknowledgement. No O(k) canonical-write, infinite-context, or solved-continual-learning claim is made."
