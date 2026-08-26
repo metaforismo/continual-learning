@@ -1,0 +1,384 @@
+name: Finalize non-executable procedure candidates (temporary)
+
+on:
+  push:
+    branches:
+      - feat/procedure-candidates-v1
+
+permissions:
+  contents: write
+  pull-requests: write
+  checks: read
+
+concurrency:
+  group: procedure-candidates-final
+  cancel-in-progress: true
+
+jobs:
+  finalize:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 50
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: feat/procedure-candidates-v1
+          fetch-depth: 0
+
+      - name: Align with current main and require validated learning foundations
+        shell: bash
+        run: |
+          set -euo pipefail
+          git fetch origin main
+          git merge --no-edit origin/main
+          test -f src/learning/experience.ts
+          test -f src/learning/applicability.ts
+          test -f src/learning/procedure-candidate.ts
+          test -f test/procedure-candidates.test.mjs
+          test -f docs/PROCEDURE_CANDIDATES.md
+
+      - name: Make utility assessments process-issued and content-addressed
+        shell: bash
+        run: |
+          set -euo pipefail
+          python <<'PY'
+          from pathlib import Path
+          path = Path('src/learning/experience.ts')
+          text = path.read_text()
+
+          def replace_once(old: str, new: str) -> None:
+              global text
+              if old not in text:
+                  raise SystemExit(f'missing utility capability block: {old[:140]!r}')
+              text = text.replace(old, new, 1)
+
+          if 'const ISSUED_UTILITY_ASSESSMENTS' not in text:
+              marker = 'const ISSUED_INTERVENTIONS = new WeakSet<object>();'
+              if marker not in text:
+                  raise SystemExit('missing experience intervention capability set')
+              text = text.replace(
+                  marker,
+                  marker + '\nconst ISSUED_UTILITY_ASSESSMENTS = new WeakSet<object>();',
+                  1,
+              )
+
+          interface_start = text.index('export interface MemoryUtilityAssessment {')
+          interface_end = text.index('\n}', interface_start)
+          interface_block = text[interface_start:interface_end]
+          if 'assessmentDigest' not in interface_block:
+              insertion = '  readonly blockers: readonly string[];'
+              if insertion not in interface_block:
+                  raise SystemExit('missing utility blockers field')
+              interface_block = interface_block.replace(
+                  insertion,
+                  insertion + '\n  readonly assessmentDigest: string;',
+                  1,
+              )
+              text = text[:interface_start] + interface_block + text[interface_end:]
+
+          old = '''  return Object.freeze({
+    memoryId,
+    status,
+    independentPairs: accepted.length,
+    excludedCorrelatedPairs: excluded.length,
+    distinctContexts,
+    positivePairs: positive.length,
+    negativePairs: negative.length,
+    neutralPairs: neutral,
+    meanEffect,
+    positiveRate,
+    negativeRate,
+    positiveWilsonLowerBound: positiveWilson,
+    negativeWilsonLowerBound: negativeWilson,
+    correlatedVerifiedSuccesses,
+    comparisonIds: Object.freeze(accepted.map((comparison) => comparison.id)),
+    excludedComparisonIds: Object.freeze(excluded.map((comparison) => comparison.id)),
+    blockers: Object.freeze(blockers),
+  });
+}'''
+          new = '''  const unsigned = Object.freeze({
+    memoryId,
+    status,
+    independentPairs: accepted.length,
+    excludedCorrelatedPairs: excluded.length,
+    distinctContexts,
+    positivePairs: positive.length,
+    negativePairs: negative.length,
+    neutralPairs: neutral,
+    meanEffect,
+    positiveRate,
+    negativeRate,
+    positiveWilsonLowerBound: positiveWilson,
+    negativeWilsonLowerBound: negativeWilson,
+    correlatedVerifiedSuccesses,
+    comparisonIds: Object.freeze(accepted.map((comparison) => comparison.id)),
+    excludedComparisonIds: Object.freeze(excluded.map((comparison) => comparison.id)),
+    blockers: Object.freeze(blockers),
+  });
+  const result = canonicalClone({
+    ...unsigned,
+    assessmentDigest: digest({ domain: 'cl-memory-utility-assessment-v1', assessment: unsigned }),
+  });
+  ISSUED_UTILITY_ASSESSMENTS.add(result as object);
+  return result;
+}'''
+          replace_once(old, new)
+
+          if 'export function assertIssuedMemoryUtilityAssessment' not in text:
+              text += '''
+
+export function assertIssuedMemoryUtilityAssessment(
+  value: unknown,
+): asserts value is MemoryUtilityAssessment {
+  if (
+    typeof value !== 'object' ||
+    value === null ||
+    !ISSUED_UTILITY_ASSESSMENTS.has(value)
+  ) {
+    throw new Error('operation requires an issued memory utility assessment');
+  }
+}
+'''
+          path.write_text(text)
+          PY
+
+      - name: Require exact role-aware EvidenceRef for every procedure step
+        shell: bash
+        run: |
+          set -euo pipefail
+          python <<'PY'
+          from pathlib import Path
+          path = Path('src/learning/procedure-candidate.ts')
+          text = path.read_text()
+
+          text = text.replace(
+              "import type { Authority, EvidenceSensitivity, EvidenceTaint, MemoryEvent } from '../domain.js';",
+              "import {\n  evidenceRoles,\n  type Authority,\n  type EvidenceRef,\n  type EvidenceSensitivity,\n  type EvidenceTaint,\n  type MemoryEvent,\n} from '../domain.js';",
+              1,
+          )
+          text = text.replace(
+              '''export interface ProcedureCandidateStepInput {
+  readonly id: string;
+  readonly instruction: string;
+  readonly evidenceSourceIds: readonly string[];
+}
+
+export interface ProcedureCandidateStep {
+  readonly id: string;
+  readonly instruction: string;
+  readonly evidenceSourceIds: readonly string[];
+}''',
+              '''export interface ProcedureCandidateStepInput {
+  readonly id: string;
+  readonly instruction: string;
+  readonly evidence: readonly EvidenceRef[];
+}
+
+export interface ProcedureCandidateStep {
+  readonly id: string;
+  readonly instruction: string;
+  readonly evidence: readonly EvidenceRef[];
+}''',
+              1,
+          )
+          old = '''    assertIdentifier(step.instruction, 'procedure step instruction', MAX_STEP_CHARACTERS);
+    const sourceIds = canonicalStrings(step.evidenceSourceIds, `procedure step ${step.id} evidence`, 64);
+    if (sourceIds.length === 0) throw new Error(`procedure step ${step.id} requires evidence`);
+    for (const sourceId of sourceIds) {
+      const projected = evidence.get(sourceId);
+      if (projected === undefined || projected.availability !== 'available') {
+        throw new Error(`procedure step evidence is unavailable: ${sourceId}`);
+      }
+      if (projected.record.scope !== 'global' && projected.record.scope !== input.scope) {
+        throw new Error(`procedure step evidence scope is unauthorized: ${sourceId}`);
+      }
+      allEvidenceIds.add(sourceId);
+      evidenceRecords.set(sourceId, projected);
+    }
+    steps.push(
+      Object.freeze({
+        id: step.id,
+        instruction: step.instruction,
+        evidenceSourceIds: sourceIds,
+      }),
+    );'''
+          new = '''    assertIdentifier(step.instruction, 'procedure step instruction', MAX_STEP_CHARACTERS);
+    if (!Array.isArray(step.evidence) || step.evidence.length === 0 || step.evidence.length > 64) {
+      throw new Error(`procedure step ${step.id} requires 1..64 evidence references`);
+    }
+    const seenSources = new Set<string>();
+    const references: EvidenceRef[] = [];
+    for (const reference of step.evidence) {
+      if (seenSources.has(reference.sourceId)) {
+        throw new Error(`procedure step ${step.id} repeats evidence ${reference.sourceId}`);
+      }
+      seenSources.add(reference.sourceId);
+      if (reference.roles === undefined) {
+        throw new Error(`procedure step ${step.id} evidence roles must be explicit`);
+      }
+      const roles = evidenceRoles(reference);
+      if (!roles.includes('supports') && !roles.includes('verifies')) {
+        throw new Error(`procedure step ${step.id} evidence must support or verify the instruction`);
+      }
+      if (roles.includes('contradicts')) {
+        throw new Error(`procedure step ${step.id} cannot use contradicting evidence as support`);
+      }
+      const projected = evidence.get(reference.sourceId);
+      if (projected === undefined || !evidence.validatesReference(reference)) {
+        throw new Error(`procedure step evidence is unavailable or forged: ${reference.sourceId}`);
+      }
+      if (projected.record.scope !== 'global' && projected.record.scope !== input.scope) {
+        throw new Error(`procedure step evidence scope is unauthorized: ${reference.sourceId}`);
+      }
+      allEvidenceIds.add(reference.sourceId);
+      evidenceRecords.set(reference.sourceId, projected);
+      references.push(canonicalClone(reference));
+    }
+    steps.push(
+      Object.freeze({
+        id: step.id,
+        instruction: step.instruction,
+        evidence: Object.freeze(references),
+      }),
+    );'''
+          if old not in text:
+              raise SystemExit('missing procedure step evidence block')
+          text = text.replace(old, new, 1)
+          path.write_text(text)
+          PY
+
+      - name: Wire exports, documentation, roadmap, and repository invariants
+        shell: bash
+        run: |
+          set -euo pipefail
+          python <<'PY'
+          from pathlib import Path
+
+          learning_index = Path('src/learning/index.ts')
+          index_text = learning_index.read_text()
+          export = "export * from './procedure-candidate.js';\n"
+          if export not in index_text:
+            learning_index.write_text(index_text + export)
+
+          readme = Path('README.md')
+          readme_text = readme.read_text()
+          marker = '- [Held-out applicability hypotheses](docs/APPLICABILITY_HYPOTHESES.md)'
+          line = '- [Non-executable procedure candidates](docs/PROCEDURE_CANDIDATES.md)'
+          if line not in readme_text:
+            if marker in readme_text:
+              readme_text = readme_text.replace(marker, marker + '\n' + line, 1)
+            else:
+              readme_text += '\n' + line + '\n'
+          implementation_marker = '- deterministic bounded applicability-rule induction with disjoint held-out validation, counterexamples, and first-class ambiguity;'
+          implementation_line = '- process-issued, evidence-role-bound, explicitly non-executable procedure candidates with verification and rollback contracts;'
+          if implementation_line not in readme_text and implementation_marker in readme_text:
+            readme_text = readme_text.replace(
+              implementation_marker,
+              implementation_marker + '\n' + implementation_line,
+              1,
+            )
+          readme.write_text(readme_text)
+
+          roadmap = Path('docs/ROADMAP.md')
+          roadmap_text = roadmap.read_text()
+          roadmap_text = roadmap_text.replace(
+            '- candidate procedure induction;',
+            '- [x] evidence-backed non-executable procedure candidate induction;\n- [ ] executable canary packaging and implementation-fidelity verification;',
+            1,
+          )
+          roadmap.write_text(roadmap_text)
+
+          agents = Path('AGENTS.md')
+          agents_text = agents.read_text()
+          invariant = '- A validated applicability hypothesis and positive utility may produce only an evidence-backed non-executable procedure candidate; canary and trusted execution require later independent gates.'
+          if invariant not in agents_text:
+            marker = '- Applicability discovery and validation must use disjoint experimental units and verifier origins; a validated hypothesis is still not procedure execution authority.'
+            if marker in agents_text:
+              agents_text = agents_text.replace(marker, marker + '\n' + invariant, 1)
+            else:
+              agents_text += '\n' + invariant + '\n'
+          agents.write_text(agents_text)
+          PY
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22.16.0
+          cache: npm
+
+      - name: Verify minimum supported runtime
+        run: |
+          npm ci --ignore-scripts --no-audit --no-fund
+          npm run check
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          check-latest: true
+          cache: npm
+
+      - name: Verify latest Node 22 and exact trust boundary
+        shell: bash
+        run: |
+          npm run check
+          git diff --check
+          git fetch origin main
+          files=$(git diff --name-only origin/main...HEAD)
+          printf '%s\n' "$files"
+          test -f src/learning/procedure-candidate.ts
+          test -f test/procedure-candidates.test.mjs
+          test -f docs/PROCEDURE_CANDIDATES.md
+          ! git diff origin/main...HEAD -- src/learning/procedure-candidate.ts src/learning/experience.ts | grep -E 'child_process|spawn\(|execFile|https?://|process\.env|eval\(|new Function'
+          ! printf '%s\n' "$files" | grep -E 'debug_report|\.sqlite($|-)|\.db$|(^|/)(dist|node_modules)/'
+
+      - name: Publish clean product head
+        shell: bash
+        run: |
+          set -euo pipefail
+          rm -f .github/workflows/finalize-procedure-candidates.yml
+          git config user.name metaforismo
+          git config user.email 39646696+metaforismo@users.noreply.github.com
+          git add -A
+          git commit -m "feat: add non-executable procedure candidates"
+          git push origin HEAD:feat/procedure-candidates-v1
+
+      - name: Open PR, wait for clean-head CI, and merge only on green
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          number=$(gh pr list --head feat/procedure-candidates-v1 --base main --state open --json number --jq '.[0].number // empty')
+          body=$(mktemp)
+          cat > "$body" <<'EOF'
+          ## Summary
+
+          Adds process-issued, evidence-backed procedure candidates that remain explicitly non-executable.
+
+          ## Contract
+
+          - requires process-issued supported-positive utility and held-out validated applicability for the same memory;
+          - binds exact utility/applicability digests and canonical fingerprint;
+          - every step requires exact available scope-compatible EvidenceRef with explicit `supports` or `verifies` role;
+          - copies the applicability rule exactly rather than broadening it during procedure writing;
+          - explicit risk, verifier, timeout, attempts, failure action, tool dependencies, and rollback target;
+          - taint, sensitivity, source-authority, independence, and high/destructive-risk blockers;
+          - immutable `status: candidate` and `executable: false`;
+          - process-local candidate capability for later lifecycle gates.
+
+          ## Verification
+
+          Exact product head is admitted only after strict TypeScript build and the full suite pass on Node 22.16.0 and latest Node 22, followed by permanent PR CI.
+
+          ## Explicit limitations
+
+          Candidate steps are not semantically proven faithful merely because they cite sources. There is no sandbox, canary traffic, verifier registry resolution, conflict composition, rollback execution, durable candidate event, infinite-context, or solved-continual-learning claim.
+          EOF
+          if [ -z "$number" ]; then
+            url=$(gh pr create --draft --base main --head feat/procedure-candidates-v1 --title "feat: add non-executable procedure candidates" --body-file "$body")
+            number=${url##*/}
+          else
+            gh pr edit "$number" --title "feat: add non-executable procedure candidates" --body-file "$body"
+          fi
+          gh pr ready "$number" || true
+          sleep 10
+          gh pr checks "$number" --watch --fail-fast
+          gh pr merge "$number" --squash --delete-branch --subject "feat: add non-executable procedure candidates (#$number)" --body "Add evidence-role-bound procedure candidates requiring process-issued positive utility and held-out applicability. Candidates remain non-executable; no trusted-skill, infinite-context, or solved-continual-learning claim is made."
