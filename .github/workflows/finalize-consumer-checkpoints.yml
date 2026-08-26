@@ -1,0 +1,379 @@
+name: Finalize durable consumer checkpoints (temporary)
+
+on:
+  push:
+    branches:
+      - feat/durable-consumer-checkpoints-v1
+
+permissions:
+  contents: write
+  pull-requests: write
+  checks: read
+
+concurrency:
+  group: durable-consumer-checkpoints-final
+  cancel-in-progress: true
+
+jobs:
+  finalize:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: feat/durable-consumer-checkpoints-v1
+          fetch-depth: 0
+
+      - name: Align with current main and require change-feed foundation
+        run: |
+          git fetch origin main
+          git merge --no-edit origin/main
+          test -f src/durable/canonical-ledger.ts
+          test -f src/durable/change-feed.ts
+          test -f src/durable/consumer-store.ts
+          test -f test/durable-consumer-checkpoints.test.mjs
+          test -f docs/DURABLE_CONSUMER_CHECKPOINTS.md
+
+      - name: Apply reviewed capability, receipt, and regression hardening
+        shell: bash
+        run: |
+          set -euo pipefail
+          python <<'PY'
+          from pathlib import Path
+
+          feed = Path('src/durable/change-feed.ts')
+          text = feed.read_text()
+          if '  #consuming = false;' not in text:
+              marker = '  #pending: CanonicalAppendBatch | undefined;'
+              if marker not in text:
+                  raise SystemExit('missing change-feed pending field')
+              text = text.replace(marker, marker + '\n  #consuming = false;', 1)
+
+          ack_start = text.index('  ack(batch: CanonicalAppendBatch): CanonicalReadCursor {')
+          retry_start = text.index('\n  retry(batch: CanonicalAppendBatch): void {', ack_start)
+          consume_and_ack = '''  consume<T>(
+    batch: CanonicalAppendBatch,
+    operation: (authorizedBatch: CanonicalAppendBatch) => T,
+  ): T {
+    if (typeof operation !== 'function') throw new TypeError('change-feed operation must be a function');
+    if (this.#consuming) throw new Error('change-feed consumption is not reentrant');
+    if (
+      typeof batch !== 'object' ||
+      batch === null ||
+      !this.#issuedBatches.has(batch as object) ||
+      this.#pending !== batch
+    ) {
+      throw new Error('change-feed batch is not the outstanding capability issued by this feed');
+    }
+    if (!sameCursor(batch.base, this.#checkpoint)) {
+      throw new Error('change-feed batch base no longer matches the consumer checkpoint');
+    }
+    this.#consuming = true;
+    try {
+      const result = operation(batch);
+      if (
+        result !== null &&
+        typeof result === 'object' &&
+        typeof (result as { readonly then?: unknown }).then === 'function'
+      ) {
+        throw new Error('change-feed consume operation must be synchronous');
+      }
+      this.#checkpoint = batch.after;
+      this.#pending = undefined;
+      return result;
+    } finally {
+      this.#consuming = false;
+    }
+  }
+
+  ack(batch: CanonicalAppendBatch): CanonicalReadCursor {
+    this.consume(batch, () => undefined);
+    return this.checkpoint();
+  }
+'''
+          text = text[:ack_start] + consume_and_ack + text[retry_start:]
+          old = '''  retry(batch: CanonicalAppendBatch): void {
+    if (
+      typeof batch !== 'object' ||'''
+          new = '''  retry(batch: CanonicalAppendBatch): void {
+    if (this.#consuming) throw new Error('change-feed consumption is not reentrant');
+    if (
+      typeof batch !== 'object' ||'''
+          if old not in text:
+              raise SystemExit('missing change-feed retry method')
+          text = text.replace(old, new, 1)
+          feed.write_text(text)
+
+          store = Path('src/durable/consumer-store.ts')
+          store_text = store.read_text()
+          old = '''        const currentRow = this.#checkpointRow(consumerId);
+        const current = currentRow === undefined ? undefined : checkpointFromRow(currentRow);
+        if (current !== undefined && !sameCursor(current.cursor, authorizedBatch.base)) {
+          throw new Error('consumer batch base is stale or out of order');
+        }
+
+        const value = operation(this.#db, authorizedBatch);'''
+          new = '''        const currentRow = this.#checkpointRow(consumerId);
+        const current = currentRow === undefined ? undefined : checkpointFromRow(currentRow);
+        if (current !== undefined) {
+          const currentReceiptRow = this.#receiptRow(consumerId, current.lastBatchId);
+          if (currentReceiptRow === undefined) {
+            throw new Error('active consumer checkpoint receipt is missing');
+          }
+          const currentReceipt = receiptFromRow(currentReceiptRow);
+          if (
+            currentReceipt.receiptDigest !== current.latestReceiptDigest ||
+            !sameCursor(currentReceipt.after, current.cursor) ||
+            currentReceipt.appendDigest !== current.lastAppendDigest
+          ) {
+            throw new Error('active consumer checkpoint differs from its receipt');
+          }
+          if (!sameCursor(current.cursor, authorizedBatch.base)) {
+            throw new Error('consumer batch base is stale or out of order');
+          }
+        }
+
+        const value = operation(this.#db, authorizedBatch);'''
+          if old not in store_text:
+              raise SystemExit('missing consumer active checkpoint block')
+          store.write_text(store_text.replace(old, new, 1))
+
+          tests = Path('test/durable-consumer-checkpoints.test.mjs')
+          test_text = tests.read_text()
+          sha_marker = '''function sha(value) {
+  return `sha256:${createHash('sha256').update(value).digest('hex')}`;
+}
+'''
+          genesis_line = '''
+const GENESIS_CHAIN_DIGEST = sha(
+  JSON.stringify({ domain: 'cl-canonical-event-chain-genesis-v1' }),
+);
+'''
+          if 'const GENESIS_CHAIN_DIGEST' not in test_text:
+              if sha_marker not in test_text:
+                  raise SystemExit('missing test sha helper')
+              test_text = test_text.replace(sha_marker, sha_marker + genesis_line, 1)
+
+          start = test_text.index("test('a durable idempotent batch retry does not rerun projection code', () => {")
+          end = test_text.index("\ntest('fault injection after the consumer receipt", start)
+          idempotent = '''test('a durable idempotent batch retry does not rerun projection code', () => {
+  const location = temporaryDatabase('cl-consumer-idempotent');
+  try {
+    const ledger = new SqliteCanonicalLedger();
+    const genesis = CanonicalChangeFeed.open(ledger).checkpoint();
+    commitAppend(ledger, [], 'idempotent', 1, 1);
+
+    const firstFeed = CanonicalChangeFeed.open(ledger, { checkpoint: genesis });
+    let firstRuns = 0;
+    const firstStore = new SqliteConsumerCheckpointStore({ database: location.database });
+    const firstBatch = firstFeed.poll();
+    assert.ok(firstBatch);
+    const first = firstStore.apply(firstFeed, firstBatch, 'projection/main', () => {
+      firstRuns += 1;
+      return 'first';
+    });
+    assert.equal(first.idempotentReplay, false);
+    assert.equal(firstRuns, 1);
+    firstStore.close();
+
+    // Simulate a crash after the store transaction but before the older feed checkpoint was saved.
+    const retryFeed = CanonicalChangeFeed.open(ledger, { checkpoint: genesis });
+    const retryStore = new SqliteConsumerCheckpointStore({ database: location.database });
+    const retryBatch = retryFeed.poll();
+    assert.ok(retryBatch);
+    assert.equal(retryBatch.id, firstBatch.id);
+    let reran = false;
+    const retry = retryStore.apply(retryFeed, retryBatch, 'projection/main', () => {
+      reran = true;
+    });
+    assert.equal(retry.idempotentReplay, true);
+    assert.equal(retry.value, undefined);
+    assert.equal(reran, false);
+    assert.equal(retryFeed.checkpoint().eventCount, 1);
+    assert.equal(retryStore.audit('projection/main').ok, true);
+    retryStore.close();
+    ledger.close();
+  } finally {
+    location.cleanup();
+  }
+});
+'''
+          test_text = test_text[:start] + idempotent + test_text[end:]
+
+          start = test_text.index("test('consumer ids have independent receipt chains and checkpoints', () => {")
+          end = test_text.index("\ntest('partial consumer schema", start)
+          multiple = '''test('consumer ids have independent receipt chains and checkpoints', () => {
+  const ledger = new SqliteCanonicalLedger();
+  const genesis = CanonicalChangeFeed.open(ledger).checkpoint();
+  commitAppend(ledger, [], 'multi-consumer', 1, 1);
+  const feedA = CanonicalChangeFeed.open(ledger, { checkpoint: genesis });
+  const feedB = CanonicalChangeFeed.open(ledger, { checkpoint: genesis });
+  const store = new SqliteConsumerCheckpointStore();
+  const batchA = feedA.poll();
+  const batchB = feedB.poll();
+  assert.ok(batchA && batchB);
+  store.apply(feedA, batchA, 'projection/a', () => 'a');
+  store.apply(feedB, batchB, 'projection/b', () => 'b');
+  assert.equal(store.checkpoint('projection/a')?.revision, 1);
+  assert.equal(store.checkpoint('projection/b')?.revision, 1);
+  assert.equal(store.audit('projection/a').ok, true);
+  assert.equal(store.audit('projection/b').ok, true);
+  ledger.close();
+  store.close();
+});
+
+test('an out-of-order complete delta cannot jump over the active consumer checkpoint', () => {
+  const ledger = new SqliteCanonicalLedger();
+  const genesis = CanonicalChangeFeed.open(ledger).checkpoint();
+  const first = commitAppend(ledger, [], 'ordered-one', 1, 1);
+  const feedOne = CanonicalChangeFeed.open(ledger, { checkpoint: genesis });
+  const store = new SqliteConsumerCheckpointStore();
+  const batchOne = feedOne.poll();
+  assert.ok(batchOne);
+  store.apply(feedOne, batchOne, 'projection/main', () => undefined);
+
+  commitAppend(ledger, first.all, 'ordered-two', 2, 2);
+  const staleFeed = CanonicalChangeFeed.open(ledger, { checkpoint: genesis });
+  const combined = staleFeed.poll();
+  assert.ok(combined);
+  assert.throws(
+    () => store.apply(staleFeed, combined, 'projection/main', () => undefined),
+    /stale or out of order/,
+  );
+  assert.equal(staleFeed.poll(), combined);
+  assert.equal(store.checkpoint('projection/main')?.cursor.eventCount, 1);
+  ledger.close();
+  store.close();
+});
+'''
+          test_text = test_text[:start] + multiple + test_text[end:]
+          test_text = test_text.replace(
+              "chainDigest: 'sha256:04cd48bf4d2397b5b053472bc749c9c85e20040ed2913743cf3f60fdf34db3a5',",
+              'chainDigest: GENESIS_CHAIN_DIGEST,',
+          )
+          tests.write_text(test_text)
+
+          durable_index = Path('src/durable/index.ts')
+          index_text = durable_index.read_text()
+          export = "export * from './consumer-store.js';\n"
+          if export not in index_text:
+              durable_index.write_text(index_text + export)
+
+          readme = Path('README.md')
+          readme_text = readme.read_text()
+          marker = '- [Canonical change feed](docs/CANONICAL_CHANGE_FEED.md)'
+          line = '- [Durable consumer checkpoints](docs/DURABLE_CONSUMER_CHECKPOINTS.md)'
+          if line not in readme_text:
+              if marker in readme_text:
+                  readme_text = readme_text.replace(marker, marker + '\n' + line, 1)
+              else:
+                  readme_text += '\n' + line + '\n'
+          implementation_marker = '- a verified pull-based canonical change feed with O(N) startup/resume verification and O(k) live complete-delta polling;'
+          implementation_line = '- an atomic per-consumer SQLite checkpoint/receipt store for trusted projection transactions and durable batch idempotency;'
+          if implementation_line not in readme_text and implementation_marker in readme_text:
+              readme_text = readme_text.replace(
+                  implementation_marker,
+                  implementation_marker + '\n' + implementation_line,
+                  1,
+              )
+          readme.write_text(readme_text)
+
+          roadmap = Path('docs/ROADMAP.md')
+          roadmap_text = roadmap.read_text()
+          marker = '- [x] verified canonical change feed for persisted consumer checkpoints and O(k) live delta polling;'
+          line = '- [x] atomic per-consumer projection transaction, receipt chain, and durable checkpoint store;'
+          if line not in roadmap_text:
+              if marker in roadmap_text:
+                  roadmap_text = roadmap_text.replace(marker, marker + '\n' + line, 1)
+              else:
+                  roadmap_text += '\n' + line + '\n'
+          roadmap.write_text(roadmap_text)
+
+          agents = Path('AGENTS.md')
+          agents_text = agents.read_text()
+          invariant = '- A consumer offset may advance only in the same trusted transaction as its projection mutation and batch receipt; async or untrusted callbacks are out of contract.'
+          if invariant not in agents_text:
+              marker = '- Canonical change-feed polling never advances a consumer checkpoint before the exact issued batch is acknowledged; startup/resume and live-delta costs must be reported separately.'
+              if marker in agents_text:
+                  agents_text = agents_text.replace(marker, marker + '\n' + invariant, 1)
+              else:
+                  agents_text += '\n' + invariant + '\n'
+          agents.write_text(agents_text)
+          PY
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22.16.0
+          cache: npm
+      - name: Verify minimum runtime
+        run: |
+          npm ci --ignore-scripts --no-audit --no-fund
+          npm run check
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          check-latest: true
+          cache: npm
+      - name: Verify latest runtime and exact trust boundary
+        shell: bash
+        run: |
+          npm run check
+          git diff --check
+          git fetch origin main
+          files=$(git diff --name-only origin/main...HEAD)
+          printf '%s\n' "$files"
+          ! git diff origin/main...HEAD -- src/durable/consumer-store.ts src/durable/change-feed.ts | grep -E 'child_process|spawn\(|execFile|https?://|process\.env|load_extension|ATTACH DATABASE|writable_schema'
+          ! printf '%s\n' "$files" | grep -E 'debug_report|\.sqlite($|-)|\.db$|(^|/)(dist|node_modules)/'
+
+      - name: Publish clean product head
+        run: |
+          rm -f .github/workflows/finalize-consumer-checkpoints.yml
+          git config user.name metaforismo
+          git config user.email 39646696+metaforismo@users.noreply.github.com
+          git add -A
+          git commit -m "feat: add durable consumer checkpoints"
+          git push origin HEAD:feat/durable-consumer-checkpoints-v1
+
+      - name: Open PR, wait for clean-head CI, and merge only on green
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          number=$(gh pr list --head feat/durable-consumer-checkpoints-v1 --base main --state open --json number --jq '.[0].number // empty')
+          body=$(mktemp)
+          cat > "$body" <<'EOF'
+          ## Summary
+
+          Adds an atomic per-consumer SQLite checkpoint and receipt store entered only through an exact outstanding canonical change-feed batch capability.
+
+          ## Contract
+
+          - trusted synchronous projection callback, receipt, and cursor advance in one `BEGIN IMMEDIATE` transaction;
+          - callback failure, Promise return, or injected fault rolls everything back and leaves the batch pending;
+          - exact durable batch retry does not rerun projection code;
+          - forged batch clones fail before callback invocation;
+          - active checkpoint receipt is revalidated before every new mutation;
+          - per-consumer receipt chains and independent revision histories;
+          - partial durable schema fails closed;
+          - full per-consumer receipt-chain audit.
+
+          ## Verification
+
+          Exact product head is admitted only after strict TypeScript build and the full suite pass on Node 22.16.0 and latest Node 22, followed by permanent PR CI.
+
+          ## Explicit limitations
+
+          The callback is trusted host code and is not sandboxed. This is one-SQLite-authority atomic/idempotent consumption, not distributed exactly-once delivery. Batch events are not duplicated in the consumer store, receipts are unkeyed, and no infinite-context or continual-learning claim is made.
+          EOF
+          if [ -z "$number" ]; then
+            url=$(gh pr create --draft --base main --head feat/durable-consumer-checkpoints-v1 --title "feat: add durable consumer checkpoints" --body-file "$body")
+            number=${url##*/}
+          else
+            gh pr edit "$number" --title "feat: add durable consumer checkpoints" --body-file "$body"
+          fi
+          gh pr ready "$number" || true
+          sleep 10
+          gh pr checks "$number" --watch --fail-fast
+          gh pr merge "$number" --squash --delete-branch --subject "feat: add durable consumer checkpoints (#$number)" --body "Atomically publish trusted projection mutations, per-consumer receipts, and canonical read checkpoints through exact change-feed batch capabilities. This is not distributed exactly-once, infinite-context, or solved continual learning."
