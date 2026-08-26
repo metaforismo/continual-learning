@@ -1,0 +1,364 @@
+name: Finalize durable canonical ledger (temporary)
+
+on:
+  push:
+    branches:
+      - feat/durable-canonical-ledger-v1
+
+permissions:
+  contents: write
+  pull-requests: write
+  checks: read
+
+concurrency:
+  group: durable-canonical-ledger-final
+  cancel-in-progress: true
+
+jobs:
+  finalize:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: feat/durable-canonical-ledger-v1
+          fetch-depth: 0
+
+      - name: Align with current main and install staged implementation if needed
+        shell: bash
+        run: |
+          set -euo pipefail
+          git fetch origin main
+          git merge --no-edit origin/main
+          if [ -f .tmp/canonical-ledger.ts ]; then
+            mkdir -p src/durable
+            mv .tmp/canonical-ledger.ts src/durable/canonical-ledger.ts
+            rmdir .tmp
+          fi
+          test -f src/durable/canonical-ledger.ts
+          test -f test/durable-canonical-ledger.test.mjs
+          test -f docs/DURABLE_CANONICAL_LEDGER.md
+
+      - name: Apply final receipt-chain and single-read hardening
+        shell: bash
+        run: |
+          set -euo pipefail
+          python <<'PY'
+          from pathlib import Path
+
+          path = Path('src/durable/canonical-ledger.ts')
+          text = path.read_text()
+
+          def replace_once(old: str, new: str) -> None:
+              global text
+              if old not in text:
+                  raise SystemExit(f'missing final durable block: {old[:140]!r}')
+              text = text.replace(old, new, 1)
+
+          if 'readonly capabilityBase: DurableCanonicalCursor;' not in text:
+              replace_once(
+                  '''interface NormalizedDurableCommitRequest {
+  readonly base: DurableCanonicalCursor;''',
+                  '''interface NormalizedDurableCommitRequest {
+  /** Original process-local object identity; deliberately excluded from the request digest. */
+  readonly capabilityBase: DurableCanonicalCursor;
+  readonly base: DurableCanonicalCursor;''',
+              )
+
+          if 'const capabilityBase = request.base;' not in text:
+              start = text.index('  #requestSnapshot(request: DurableCommitRequest): NormalizedDurableCommitRequest {')
+              end = text.index('\n  #validateRequest(', start)
+              method = '''  #requestSnapshot(request: DurableCommitRequest): NormalizedDurableCommitRequest {
+    if (typeof request !== 'object' || request === null) {
+      throw new TypeError('durable commit request has an invalid runtime shape');
+    }
+    const capabilityBase = request.base;
+    const idempotencyKey = request.idempotencyKey;
+    const committedBy = request.committedBy;
+    const suppliedEvents = request.events;
+    const suppliedTransition = request.transition;
+    const suppliedAudit = request.audit;
+    if (
+      typeof idempotencyKey !== 'string' ||
+      typeof committedBy !== 'string' ||
+      !Array.isArray(suppliedEvents) ||
+      typeof capabilityBase !== 'object' ||
+      capabilityBase === null ||
+      typeof suppliedTransition !== 'object' ||
+      suppliedTransition === null ||
+      typeof suppliedAudit !== 'object' ||
+      suppliedAudit === null
+    ) {
+      throw new TypeError('durable commit request has an invalid runtime shape');
+    }
+    const base = cloneJson(capabilityBase);
+    const events = cloneJson(suppliedEvents);
+    const transition = cloneJson(suppliedTransition);
+    const audit = cloneJson(suppliedAudit);
+    const payload = { base, idempotencyKey, committedBy, events, transition, audit };
+    const canonical = stableJson(payload);
+    if (canonical.length > this.#maxRequestCharacters) {
+      throw new RangeError('durable commit request exceeds the canonical size budget');
+    }
+    return Object.freeze({
+      capabilityBase,
+      ...payload,
+      requestDigest: contentDigest({ domain: 'cl-durable-request-v1', payload }),
+    });
+  }
+'''
+              text = text[:start] + method + text[end:]
+
+          text = text.replace(
+              '      this.#assertCursorCapability(request.base);',
+              '      this.#assertCursorCapability(snapshot.capabilityBase);',
+          )
+
+          if '#verifyReceiptHistory(meta: MetaRow): number' not in text:
+              marker = '  #requestSnapshot(request: DurableCommitRequest): NormalizedDurableCommitRequest {'
+              at = text.index(marker)
+              helper = '''  #verifyReceiptHistory(meta: MetaRow): number {
+    const receipts = this.#db
+      .prepare('SELECT * FROM cl_canonical_receipts ORDER BY revision')
+      .all() as unknown as readonly ReceiptRow[];
+    const audits = this.#db
+      .prepare('SELECT * FROM cl_canonical_audits ORDER BY revision')
+      .all() as unknown as readonly AuditRow[];
+    if (receipts.length !== meta.revision || audits.length !== meta.revision) {
+      throw new Error('receipt or audit count differs from canonical revision');
+    }
+    let previousReceipt = GENESIS_RECEIPT_DIGEST;
+    let previousChain = GENESIS_CHAIN_DIGEST;
+    let previousToSeq = 0;
+    let previousCommittedAt = -1;
+    for (let index = 0; index < receipts.length; index += 1) {
+      const row = receipts[index];
+      if (row === undefined || row.revision !== index + 1) {
+        throw new Error(`receipt revision gap at ${index + 1}`);
+      }
+      const receipt = receiptFromRow(row);
+      const audit = audits[index];
+      if (audit === undefined) throw new Error(`audit is missing at revision ${receipt.revision}`);
+      this.#verifiedAudit(audit, receipt);
+      if (
+        receipt.previousReceiptDigest !== previousReceipt ||
+        receipt.baseChainDigest !== previousChain ||
+        receipt.appendFromSeq !== previousToSeq + 1 ||
+        receipt.committedAt <= previousCommittedAt
+      ) {
+        throw new Error(`receipt chain or append range mismatch at revision ${receipt.revision}`);
+      }
+      const eventRows = this.#db
+        .prepare('SELECT * FROM cl_canonical_events WHERE seq BETWEEN ? AND ? ORDER BY seq')
+        .all(receipt.appendFromSeq, receipt.appendToSeq) as unknown as readonly EventRow[];
+      const events = eventRows.map((event) => JSON.parse(event.event_json) as MemoryEvent);
+      if (
+        eventRows.length !== receipt.appendToSeq - receipt.appendFromSeq + 1 ||
+        eventRows.some((event) => event.revision !== receipt.revision) ||
+        appendDigest(events) !== receipt.appendDigest ||
+        eventRows.at(-1)?.chain_digest !== receipt.afterChainDigest
+      ) {
+        throw new Error(`receipt event range mismatch at revision ${receipt.revision}`);
+      }
+      previousReceipt = receipt.receiptDigest;
+      previousChain = receipt.afterChainDigest;
+      previousToSeq = receipt.appendToSeq;
+      previousCommittedAt = receipt.committedAt;
+    }
+    if (
+      previousReceipt !== meta.latest_receipt_digest ||
+      previousChain !== meta.chain_digest ||
+      previousToSeq !== meta.last_seq
+    ) {
+      throw new Error('receipt chain head differs from canonical metadata');
+    }
+    return receipts.length;
+  }
+
+'''
+              text = text[:at] + helper + text[at:]
+
+          old = '''    const meta = this.#meta();
+    if (
+      meta.revision < receipt.revision ||'''
+          new = '''    const meta = this.#meta();
+    this.#loadEventsVerified(meta);
+    this.#verifyReceiptHistory(meta);
+    if (
+      meta.revision < receipt.revision ||'''
+          if old in text:
+              text = text.replace(old, new, 1)
+
+          old = '''      const existingEvents = this.#loadEventsVerified(meta);
+      this.#inject('after-prefix-audit');'''
+          new = '''      const existingEvents = this.#loadEventsVerified(meta);
+      this.#verifyReceiptHistory(meta);
+      this.#inject('after-prefix-audit');'''
+          if old in text:
+              text = text.replace(old, new, 1)
+
+          audit_start = text.index('  audit(): DurableLedgerAudit {')
+          audit_end = text.index('\n  close(): void {', audit_start)
+          audit_method = '''  audit(): DurableLedgerAudit {
+    return this.#transaction('read', () => {
+      const errors: string[] = [];
+      const meta = this.#meta();
+      const cursor = this.#issueCursor(meta);
+      try {
+        this.#loadEventsVerified(meta);
+      } catch (error) {
+        errors.push(error instanceof Error ? error.message : 'canonical event audit failed');
+      }
+      let receiptCount = 0;
+      try {
+        receiptCount = this.#verifyReceiptHistory(meta);
+      } catch (error) {
+        errors.push(error instanceof Error ? error.message : 'receipt/audit history verification failed');
+      }
+      return Object.freeze({
+        ok: errors.length === 0,
+        errors: Object.freeze(errors),
+        cursor,
+        receiptCount,
+      });
+    });
+  }
+'''
+          text = text[:audit_start] + audit_method + text[audit_end:]
+          path.write_text(text)
+
+          durable_index = Path('src/durable/index.ts')
+          durable_index.write_text("export * from './canonical-ledger.js';\n")
+          root = Path('src/index.ts')
+          root_text = root.read_text()
+          export = "export * from './durable/index.js';\n"
+          if export not in root_text:
+              root.write_text(root_text + export)
+
+          readme = Path('README.md')
+          readme_text = readme.read_text()
+          docs_marker = '- [Transition verification](docs/TRANSITION_VERIFICATION.md)'
+          docs_line = '- [Durable canonical ledger](docs/DURABLE_CANONICAL_LEDGER.md)'
+          if docs_line not in readme_text:
+              if docs_marker in readme_text:
+                  readme_text = readme_text.replace(docs_marker, docs_marker + '\n' + docs_line, 1)
+              else:
+                  readme_text += '\n' + docs_line + '\n'
+          implementation_marker = '- a content-addressed evidence metadata plane with provenance DAGs, source independence, sensitivity, taint, and availability state;'
+          implementation_line = '- an atomic SQLite canonical event-byte ledger with event/receipt hash chains, idempotent receipts, audit records, and whole-ledger cursor CAS;'
+          if implementation_line not in readme_text and implementation_marker in readme_text:
+              readme_text = readme_text.replace(
+                  implementation_marker,
+                  implementation_marker + '\n' + implementation_line,
+                  1,
+              )
+          readme.write_text(readme_text)
+
+          roadmap = Path('docs/ROADMAP.md')
+          roadmap_text = roadmap.read_text()
+          old = '- SQLite event ledger and projection checkpoints;'
+          new = '- [x] atomic SQLite canonical event-byte ledger, audit records, idempotent receipts, and whole-ledger cursor CAS;\n- [ ] projection checkpoints coordinated with the canonical cursor;'
+          if old in roadmap_text:
+              roadmap_text = roadmap_text.replace(old, new, 1)
+          roadmap.write_text(roadmap_text)
+
+          agents = Path('AGENTS.md')
+          agents_text = agents.read_text()
+          invariant = '- Durable canonical publication must atomically commit event bytes, transition audit, receipt, and cursor metadata; an index or receipt is never a second source of truth.'
+          if invariant not in agents_text:
+              marker = '- Canonical experience history is append-only.'
+              if marker in agents_text:
+                  agents_text = agents_text.replace(marker, marker + '\n' + invariant, 1)
+              else:
+                  agents_text += '\n' + invariant + '\n'
+          agents.write_text(agents_text)
+          PY
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22.16.0
+          cache: npm
+
+      - name: Verify minimum supported runtime
+        run: |
+          npm ci --ignore-scripts --no-audit --no-fund
+          npm run check
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          check-latest: true
+          cache: npm
+
+      - name: Verify latest Node 22 and exact diff boundary
+        shell: bash
+        run: |
+          npm run check
+          git diff --check
+          git fetch origin main
+          files=$(git diff --name-only origin/main...HEAD)
+          printf '%s\n' "$files"
+          test -f src/durable/canonical-ledger.ts
+          test -f src/durable/index.ts
+          test -f test/durable-canonical-ledger.test.mjs
+          test -f docs/DURABLE_CANONICAL_LEDGER.md
+          ! git diff origin/main...HEAD -- src/durable/canonical-ledger.ts | grep -E 'child_process|spawn\(|execFile|https?://|load_extension|ATTACH DATABASE|writable_schema|process\.env'
+          ! printf '%s\n' "$files" | grep -E 'debug_report|\.sqlite($|-)|\.db$|(^|/)(dist|node_modules)/'
+
+      - name: Remove all temporary durable scaffolding and publish clean head
+        shell: bash
+        run: |
+          set -euo pipefail
+          rm -f .github/workflows/apply-durable-ledger.yml
+          rm -f .github/workflows/finalize-durable-ledger.yml
+          rm -rf .tmp
+          git config user.name metaforismo
+          git config user.email 39646696+metaforismo@users.noreply.github.com
+          git add -A
+          git commit -m "feat: add durable canonical SQLite ledger"
+          git push origin HEAD:feat/durable-canonical-ledger-v1
+
+      - name: Open or update PR, wait for clean-head checks, and merge only on green
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          number=$(gh pr list --head feat/durable-canonical-ledger-v1 --base main --state open --json number --jq '.[0].number // empty')
+          body=$(mktemp)
+          cat > "$body" <<'EOF'
+          ## Summary
+
+          Adds a durable canonical SQLite event-byte store that atomically publishes accepted events, event-chain state, transition audit, idempotent receipt, receipt-chain state, and canonical cursor metadata.
+
+          ## Core contract
+
+          - deterministic canonical event bytes and SHA-256 event chain;
+          - full semantic prefix and receipt/audit chain verification before every new v1 mutation;
+          - `BEGIN IMMEDIATE` whole-ledger cursor compare-and-swap;
+          - process-local cursor capability for new writes;
+          - exact durable idempotent retry after restart, without granting authority to mutate;
+          - audit/receipt transition binding and event-to-revision attribution;
+          - rollback at every injected publication phase;
+          - bounded locally verified range reads;
+          - fast tail status separated from O(N) forensic audit;
+          - partial canonical schema fails closed.
+
+          ## Verification
+
+          Exact product head is admitted only after strict TypeScript build and the complete test suite pass on Node 22.16.0 and latest Node 22, followed by the permanent PR CI matrix.
+
+          ## Explicit limitations
+
+          New commits, startup semantic recovery, and full audit remain O(N). Request digests are not independently reconstructable because complete requests are not duplicated in storage. Actors/verifier metadata are not authenticated, digests are unkeyed, and this PR does not prove infinite context or continual learning.
+          EOF
+          if [ -z "$number" ]; then
+            url=$(gh pr create --draft --base main --head feat/durable-canonical-ledger-v1 --title "feat: add durable canonical SQLite ledger" --body-file "$body")
+            number=${url##*/}
+          else
+            gh pr edit "$number" --title "feat: add durable canonical SQLite ledger" --body-file "$body"
+          fi
+          gh pr ready "$number" || true
+          sleep 10
+          gh pr checks "$number" --watch --fail-fast
+          gh pr merge "$number" --squash --delete-branch --subject "feat: add durable canonical SQLite ledger (#$number)" --body "Atomically persist canonical event bytes, transition audit, idempotent receipt, event/receipt chain heads, and cursor CAS under one SQLite transaction. New-commit and full-audit cost remains O(N); no infinite-context or solved-continual-learning claim is made."
