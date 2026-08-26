@@ -21,6 +21,8 @@ Inspect the current repository, branch, pull requests, workflows, tests, and rec
 - Raw sensitive bytes stay outside the immutable event log; metadata and tombstones remain auditable.
 - Retrieval does not imply authorization.
 - Retrieval indexes are rebuildable caches, never canonical truth. Search results must be canonically rehydrated before context or action.
+- Cache generations are publication metadata, not epistemic state. Unchanged rows may retain an older last-modified generation.
+- Canonical rehydration must remain possible without trusting or reopening the disposable retrieval cache.
 - Retriever ranks and scores are advisory candidate-routing signals, not evidence authority or state truth.
 - A retrieval miss is not evidence of absence; exhaustive claims require an explicit coverage protocol.
 - Transaction lifecycle (`active` or `superseded`) is not a substitute for bitemporal state adjudication.
