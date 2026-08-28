@@ -25,6 +25,11 @@ Report both final task accuracy and intermediate diagnostics.
 - immutable snapshots;
 - duplicate/idempotency handling;
 - crash-prefix recovery;
+- real process termination after event/audit/receipt/cursor writes but before SQLite commit;
+- exact restart idempotency without new mutation authority;
+- raw SQLite NUL and malformed UTF-8 aliases in events, receipts, audits, and cursor metadata;
+- historical receipt/audit corruption after an otherwise healthy startup;
+- schema weakening through missing uniqueness or canonical-table triggers;
 - schema migration fixtures;
 - concurrent update anomalies.
 

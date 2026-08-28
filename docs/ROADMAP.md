@@ -25,7 +25,7 @@ Exit gate: all Level 1 evidence requirements in [EVALUATION.md](EVALUATION.md).
 
 ## Phase 1 — Durable local memory substrate
 
-- SQLite event ledger and projection checkpoints;
+- [x] crash-safe SQLite canonical event-byte ledger with event/receipt hash chains, transition audit, idempotent receipts, and whole-ledger cursor CAS;
 - [x] rebuildable FTS5 lexical candidate projection with canonical rehydration;
 - pluggable embedding interface and optional vector index;
 - association and temporal indexes;
@@ -34,9 +34,10 @@ Exit gate: all Level 1 evidence requirements in [EVALUATION.md](EVALUATION.md).
 - [x] source/artifact content-addressing contract;
 - artifact/blob provider with digest verification;
 - [x] checkpointed FTS5 changed-row publication, exact-prefix verification, fixed bucket manifests, and hash-chained projection checkpoints;
-- evidence metadata persistence and O(k) canonical cursor advancement;
+- [x] evidence and transition metadata persistence through canonical event bytes;
+- O(k) canonical cursor advancement and bounded change-feed consumption;
 - export, inspect, supersede, suppress, and forget APIs;
-- deterministic replay against persisted fixtures.
+- [x] deterministic semantic replay, real-process crash recovery, and persisted corruption fixtures.
 
 Exit gate: state and retrieval correctness remain stable while the dataset grows by several orders of magnitude.
 
@@ -65,7 +66,8 @@ Exit gate: bounded p95 read/context cost and no material degradation on controll
 - [x] premise resistance and role-aware context packets;
 - [ ] human review UI for high-impact ambiguity;
 - [x] content-addressed process-local transition verdict journal;
-- [ ] atomic durable ledger + verdict commit, serializable per-belief partitions, and authenticated judge identities;
+- [x] atomic durable ledger + exact verifier verdict/audit/receipt commit;
+- [ ] serializable per-belief partitions and authenticated judge identities;
 - [ ] persisted, signed state-policy versions and migration fixtures.
 
 Exit gate: strong current-state, historical-state, premise-resistance, and contamination results.

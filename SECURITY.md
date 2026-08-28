@@ -72,6 +72,12 @@ Transition policies cap operation count, scope fan-out, evidence fan-in, checks,
 canonical proposal size. Hosts must additionally cap raw request bytes and parser depth before calling
 the library.
 
+### Durable canonical publication
+
+New SQLite canonical mutations require the exact cursor issued by the open ledger and the exact accepted result issued by its configured `TransitionVerifier`. Event bytes, event-chain advancement, audit, idempotency receipt, receipt-chain advancement, and cursor metadata are published under one `BEGIN IMMEDIATE` transaction. Exact retries after restart perform complete event/receipt/audit verification before returning the prior receipt.
+
+The durable boundary rejects embedded NULs, ill-formed Unicode, non-canonical SQLite UTF-8 aliases, weakened uniqueness contracts, and triggers on canonical tables. File databases require WAL and `synchronous = FULL`. These controls detect accidental or partial corruption; unkeyed hashes do not authenticate a database operator capable of coherently rewriting the entire history. Deployments handling valuable or personal state still require protected storage, signed checkpoints, authenticated actors, backups, and incident recovery.
+
 ### Reversible learning
 
 Procedures, controller versions, adapters, and context policies must support suppression and rollback.

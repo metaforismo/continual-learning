@@ -193,9 +193,18 @@ issued it.
 
 ### 5. Commit the append
 
-Accepted operations are reconstructed as one staged append over the verified base prefix. Commit
-returns a new kernel and rechecks the base and resulting fingerprints, so failure cannot leave a
-partial in-memory write. Durable atomic persistence remains a later storage-layer contract.
+Accepted operations are reconstructed as one staged append over the verified base prefix. The in-memory verifier rechecks the base, append, and resulting fingerprints. The durable SQLite boundary then requires the exact verifier-issued result and an exact ledger-issued cursor before atomically publishing:
+
+```text
+canonical event bytes
++ event hash-chain advancement
++ transition audit
++ idempotency receipt
++ receipt hash-chain advancement
++ canonical cursor compare-and-swap
+```
+
+A failed write or real process crash before `COMMIT` leaves the previous canonical cursor visible. New commits and restart retries perform full semantic and receipt-history verification in v1.
 
 ## Read path
 
@@ -364,7 +373,7 @@ No request should scan the entire history or rebuild a global graph.
 
 ### Bounded write cost
 
-Raw capture is append-only and cheap. Expensive extraction, association learning, and consolidation should be incremental and partitioned. Background work must be idempotent, checkpointed, and safe to retry.
+The implemented durable ledger v1 intentionally performs full prefix and receipt-history verification before each new commit, so publication remains `O(N)` in lifetime history. This is the correctness baseline, not the final scale architecture. A later hash-chain cursor and verified change feed must reduce the normal append path to `O(k)` without weakening atomic audit/receipt publication. Expensive extraction, indexing, association learning, and consolidation should remain incremental, idempotent, checkpointed, and safe to retry.
 
 ### Index independence
 
@@ -398,6 +407,11 @@ The current kernel enforces a first subset:
 22. unverified successes cannot manufacture procedure confidence;
 23. procedure promotion requires cross-context evidence and counterexample search;
 24. dependency closures cannot bypass context packet caps;
+25. durable canonical writes require an exact ledger-issued cursor and the exact accepted result capability issued by the configured verifier;
+26. canonical event bytes, audit, receipt, both hash-chain heads, and cursor metadata publish atomically under SQLite compare-and-swap;
+27. startup and new durable commits perform full semantic event and receipt/audit history verification;
+28. canonical SQLite identity and integrity text is verified against its exact stored UTF-8 bytes;
+29. real-process failure before `COMMIT` leaves no event, audit, receipt, or cursor fragment;
 25. multi-event memory updates are staged atomically against an exact base fingerprint;
 26. proposed writes cannot omit declared evidence silently or use undeclared evidence;
 27. state-changing proposals must declare and verify the actual affected claim keys;
