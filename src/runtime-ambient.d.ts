@@ -18,6 +18,7 @@ declare module 'node:sqlite' {
     constructor(location: string);
     exec(sql: string): void;
     prepare(sql: string): StatementSync;
+    readonly isTransaction: boolean;
     close(): void;
   }
 }

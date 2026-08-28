@@ -244,3 +244,10 @@ Every result must retain:
 - cost accounting.
 
 Do not report a headline number without a machine-readable manifest and a rerunnable command.
+
+## Durable delivery and consumer evaluation
+
+Delivery tests must cover genesis versus explicit-tail bootstrap, multi-batch catch-up, stable batch
+identity after concurrent appends, persisted checkpoint verification, forged/copy capability
+rejection, reentrancy, configuration drift, idempotent restart, fault injection, real process crash,
+consumer-schema tampering, raw SQLite byte corruption, and independent consumer chains.

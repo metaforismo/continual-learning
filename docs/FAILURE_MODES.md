@@ -138,3 +138,17 @@ The architecture reduces risk but does not solve several research questions:
 - evaluating continual learnability over realistic month- or year-scale streams.
 
 These remain explicit research targets, not implementation details to hand-wave away.
+
+## Durable delivery failures
+
+| Failure | Required response |
+|---|---|
+| New consumer silently starts at tail | Default to genesis; require explicit tail bootstrap |
+| Backlog exceeds one request budget | Emit several bounded contiguous batches, never truncate |
+| Tail advances before retry | Keep batch identity bound to the original canonical range |
+| Projection commits but cursor does not | Projection mutation, receipt, and cursor share one SQLite transaction |
+| Cursor commits but projection fails | Roll back the entire consumer transaction |
+| Projection code changes under one consumer id | Bind a durable configuration digest and reject drift |
+| Callback mutates consumer receipts/checkpoints | Re-attest owned state and schema before publication |
+| Async callback escapes transaction lifetime | Reject Promise/thenable results |
+| Malformed SQLite text aliases metadata | Verify raw UTF-8 bytes, storage classes, and canonical JSON |

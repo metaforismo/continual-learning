@@ -420,3 +420,24 @@ The current kernel enforces a first subset:
 30. only the trusted verifier runtime that issued an accepted result can commit it;
 31. accepted results retain only a content-addressed append, not a copy of historical memory;
 32. transition proposals are bounded by policy-defined operation, scope, evidence, check, assertion, and size limits.
+
+## Durable delivery and projection consumption
+
+The durable ledger is consumed through a separate verified delivery boundary:
+
+```text
+canonical cursor N
+    -> bounded canonical batch N+1..M
+    -> registered projection transaction
+    -> projection mutation + receipt + consumer cursor M
+```
+
+A new feed starts at genesis unless tail skipping is explicit. Consumer registration binds the
+initial completeness boundary and a configuration digest before any batch is applied. Batch identity
+is stable for one exact canonical range even when the ledger tail advances later. Projection callbacks
+run synchronously on the consumer store connection; changes to consumer-owned metadata, schema, or
+required PRAGMAs fail and roll back.
+
+The consumer cursor is derived-state metadata, not canonical truth. Losing a projection database may
+require replay from its registered initial cursor, but it never authorizes rewriting the canonical
+ledger.

@@ -43,6 +43,11 @@ Inspect the current repository, branch, pull requests, workflows, tests, and rec
 - Exact idempotent retries may cross restart only after the complete durable event/receipt/audit history verifies.
 - Raw SQLite text used for canonical identity or integrity must be checked at the byte level; decoded string equality is insufficient.
 - The canonical SQLite ledger is not a rebuildable cache. Never reset or repair it silently after schema, byte, chain, or semantic corruption.
+- New change-feed consumers start at genesis unless tail skipping is explicit; an omitted checkpoint must never silently discard history.
+- Change-feed batch identity is bound to the exact canonical range, not to a later tail observation, so exact retry remains stable.
+- Projection consumers require a durable configuration digest and explicit initial cursor before the first batch.
+- Projection mutation, consumer receipt, and consumer cursor must commit atomically; async callbacks and reentrant feed mutation are forbidden.
+- Trusted projection callbacks use the restricted projection transaction only; raw connection access, transaction control, PRAGMAs, catalog access, and `cl_consumer_*` SQL are forbidden.
 - External checks are untrusted metadata unless the host has authenticated or independently authorized the verifier/evidence path.
 - Transition proposals must remain within policy resource bounds and exact authorized scopes.
 - All learned behavior must be inspectable, suppressible, and testable.
