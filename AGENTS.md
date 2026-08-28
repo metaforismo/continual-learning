@@ -38,6 +38,11 @@ Inspect the current repository, branch, pull requests, workflows, tests, and rec
 - Model-facing state packets require provenance closure by default.
 - Model- or plugin-proposed memory operations must pass a trusted-host `TransitionVerifier`; do not append them directly.
 - A pure transition verdict is not commit authority; only the owning verifier runtime may commit its exact accepted result.
+- New durable canonical writes require both an exact ledger-issued cursor and the exact accepted result issued by the configured verifier runtime. Matching JSON is not authority.
+- Canonical event bytes, event-chain advancement, transition audit, idempotency receipt, receipt-chain advancement, and cursor publication must commit atomically.
+- Exact idempotent retries may cross restart only after the complete durable event/receipt/audit history verifies.
+- Raw SQLite text used for canonical identity or integrity must be checked at the byte level; decoded string equality is insufficient.
+- The canonical SQLite ledger is not a rebuildable cache. Never reset or repair it silently after schema, byte, chain, or semantic corruption.
 - External checks are untrusted metadata unless the host has authenticated or independently authorized the verifier/evidence path.
 - Transition proposals must remain within policy resource bounds and exact authorized scopes.
 - All learned behavior must be inspectable, suppressible, and testable.

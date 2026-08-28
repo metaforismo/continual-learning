@@ -14,6 +14,12 @@ The primary design goal is not maximum memory volume. It is preventing accumulat
 | Write | Destructive overwrite | New state erases history and the evidence needed to repair it | Append-only audit row; projections, not in-place truth mutation |
 | Write | Replay inconsistency | An LLM judge returns a different decision when the same history is replayed | Log judge/model/config/output hash; deterministic operators where possible |
 | Write | Concurrent drift | Two writers update the same belief partition and both commit | Compare-and-set revisions or serializable per-key transactions |
+| Write | Partial durable publication | Events become visible without their audit/receipt/cursor, or vice versa | One `BEGIN IMMEDIATE` transaction over events, both hash chains, audit, receipt, and cursor CAS |
+| Write | Copied verifier result | Accepted-looking JSON is persisted without the verifier runtime that issued it | Exact process-local verifier capability for new commits; durable receipt recovery only for an exact prior request |
+| Write | Historical receipt corruption | A healthy tail hides an altered older receipt or audit | Full receipt/audit history verification on startup, new commits, receipt reads, and idempotent recovery |
+| Write | SQLite text alias | NUL or malformed UTF-8 bytes decode to an apparently valid JavaScript identity | Reject non-round-trippable text and compare raw SQLite `hex(...)` with canonical UTF-8 |
+| Write | Schema weakening | Missing uniqueness or malicious triggers manufacture duplicates or side effects | Exact STRICT column/unique contract and no triggers on canonical tables |
+| Write | Admission-policy drift | A lower current append limit invalidates already-authorized history | Separate the current admission limit from the durable protocol hard bound |
 | Write | Authority escalation | A model inference is stored as if directly confirmed by a human | Authority cannot exceed cited evidence; explicit admission policy |
 | Write | Duplicate evidence inflation | Chunks, retries, mirrors, or summaries of one source are treated as independent confirmations | Digest deduplication plus inherited source-group unions |
 | Write | Partial multi-event commit | Early events persist before a later operation fails | Isolated semantic replay and one verified append |
