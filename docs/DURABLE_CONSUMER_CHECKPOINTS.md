@@ -19,12 +19,15 @@ A consumer must be registered before its first batch with:
 ```text
 consumer id
 configuration digest
+exclusive lowercase projection-object prefix
 explicit initial canonical cursor
 registration time and digest
 ```
 
 The configuration digest binds projection schema/code version, privacy policy, and interpretation
-semantics. Reusing the same consumer id with a different configuration or initial cursor fails.
+semantics. The object prefix reserves a non-overlapping SQL namespace for that consumer; it cannot
+overlap reserved metadata, another registration, or a pre-existing SQLite object. Reusing the same
+consumer id with a different configuration, prefix, or initial cursor fails.
 
 The initial cursor is the completeness declaration:
 
@@ -39,7 +42,7 @@ Registration is idempotent when configuration and initial cursor are unchanged.
 Application enters through:
 
 ```text
-store.apply(feed, batch, { consumerId, configurationDigest }, callback)
+store.apply(feed, batch, { consumerId, configurationDigest, projectionTablePrefix }, callback)
                          │
                          └── feed.consume checks the exact outstanding capability
 ```
@@ -55,8 +58,9 @@ BEGIN IMMEDIATE
     attest connection and consumer schema
     verify registration and exact batch
     compare batch.base with registration/checkpoint cursor
-    issue restricted single-statement projection transaction
+    issue revocable namespace-scoped projection capability
     run trusted synchronous projection mutation
+    revoke capability before inspecting the callback result
     re-attest PRAGMAs, schema, and outer transaction
     append receipt
     publish checkpoint
@@ -67,10 +71,12 @@ feed advances in memory
 Any failure rolls back projection changes, receipt, and checkpoint. The feed retains the same pending
 batch.
 
-The callback may create/update projection-owned tables through `run`, and read them through `get`
-or `all`. It has no raw `DatabaseSync`. SQL is restricted to one statement and cannot access
-`cl_consumer_*`, SQLite catalogs, transaction control, PRAGMAs, attachments, or extension/file helper
-functions. Promise/thenable results are rejected.
+The callback may create/update objects under its registered prefix through `run`, and read one owned
+table through `get` or `all`. It has no raw `DatabaseSync`. The capability is revoked when the callback
+returns or throws, before Promise/thenable inspection, so retaining the object cannot extend transaction
+authority. SQL is restricted to one unquoted statement: no cross-consumer objects, joins, subqueries,
+CTEs, compound queries, external-content FTS5 tables, `cl_consumer_*`, catalogs, transaction control,
+PRAGMAs, attachments, or extension/file helpers. Anonymous parameters are runtime-typed and bounded.
 
 ## Crash and retry
 
@@ -78,8 +84,9 @@ If the process exits before `COMMIT`, SQLite preserves the registration but roll
 rows, receipt, and checkpoint.
 
 If the store commits and the process exits before the feed's in-memory advancement, restart from the
-registered/previous cursor and poll the same canonical range. Stable batch identity lets the store
-find the existing receipt and advance without rerunning projection code.
+registered/previous cursor and poll the same canonical range. Within one live feed, `retry()` preserves
+the exact pending capability; across restart, stable range identity lets the store find the existing
+receipt and advance without rerunning projection code.
 
 ```text
 same consumer + configuration + canonical range
@@ -148,7 +155,7 @@ Projection-owned table semantics remain the adapter's responsibility.
 
 ## Security boundary
 
-The callback is trusted host code behind a restricted single-statement SQL surface, not a model-generated SQL surface. This module does not provide
+The callback is trusted host code behind a revocable, namespace-scoped SQL surface, not a model-generated SQL surface. This module does not provide
 actor authentication, sandboxing, digital signatures, distributed leases, consensus, or protection
 against an operator able to rewrite the full database and recompute all unkeyed digests.
 

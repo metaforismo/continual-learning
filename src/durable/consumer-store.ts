@@ -14,8 +14,16 @@ import {
 
 const CONSUMER_SCHEMA_VERSION = 1 as const;
 const MAX_CONSUMER_ID_BYTES = 256;
+const MAX_PROJECTION_TABLE_PREFIX_BYTES = 96;
+const PROJECTION_TABLE_PREFIX_PATTERN = /^[a-z][a-z0-9_]*_$/;
+const RESERVED_PROJECTION_PREFIXES = Object.freeze(['cl_consumer_', 'sqlite_']);
 const MAX_BUSY_TIMEOUT_MS = 60_000;
 const MAX_PROJECTION_SQL_CHARACTERS = 100_000;
+const MAX_PROJECTION_SQL_PARAMETERS = 1_024;
+const MAX_PROJECTION_PARAMETER_BYTES = 1_048_576;
+const MAX_PROJECTION_PARAMETER_TOTAL_BYTES = 8_388_608;
+const MIN_SQLITE_INT64 = -(1n << 63n);
+const MAX_SQLITE_INT64 = (1n << 63n) - 1n;
 const SHA256_PATTERN = /^sha256:[0-9a-f]{64}$/;
 const GENESIS_RECEIPT_DIGEST = contentDigest({ domain: 'cl-consumer-receipt-chain-genesis-v1' });
 
@@ -42,6 +50,7 @@ const EXPECTED_TABLE_SQL: Readonly<Record<string, string>> = Object.freeze({
     CREATE TABLE ${TABLE_REGISTRATIONS} (
       consumer_id TEXT PRIMARY KEY,
       configuration_digest TEXT NOT NULL,
+      projection_table_prefix TEXT NOT NULL UNIQUE,
       initial_cursor_json TEXT NOT NULL,
       initial_cursor_digest TEXT NOT NULL,
       registered_at INTEGER NOT NULL CHECK (registered_at > 0),
@@ -214,6 +223,28 @@ function validateConsumerId(consumerId: unknown): asserts consumerId is string {
   }
 }
 
+function validateProjectionTablePrefix(value: unknown): asserts value is string {
+  assertSqliteText(value, 'projectionTablePrefix');
+  if (value !== value.toLowerCase()) {
+    throw new Error('projectionTablePrefix must be lowercase');
+  }
+  if (!PROJECTION_TABLE_PREFIX_PATTERN.test(value)) {
+    throw new Error(
+      'projectionTablePrefix must use lowercase ASCII letters, digits, underscores, and end with an underscore',
+    );
+  }
+  if (new TextEncoder().encode(value).length > MAX_PROJECTION_TABLE_PREFIX_BYTES) {
+    throw new Error(
+      `projectionTablePrefix cannot exceed ${MAX_PROJECTION_TABLE_PREFIX_BYTES} UTF-8 bytes`,
+    );
+  }
+  for (const reserved of RESERVED_PROJECTION_PREFIXES) {
+    if (value.startsWith(reserved) || reserved.startsWith(value)) {
+      throw new Error(`projectionTablePrefix overlaps reserved namespace ${reserved}`);
+    }
+  }
+}
+
 function validateConfigurationDigest(value: unknown): asserts value is string {
   assertDigest(value, 'consumer configuration digest');
 }
@@ -257,6 +288,8 @@ export interface ConsumerRegistrationRequest {
   readonly consumerId: string;
   /** Binds projection schema, code/configuration, privacy policy, and rendering semantics. */
   readonly configurationDigest: string;
+  /** Exclusive lowercase SQL namespace. Every projection object must begin with this prefix. */
+  readonly projectionTablePrefix: string;
   /** Explicit completeness boundary. Genesis replays history; a tail cursor intentionally skips it. */
   readonly initialCursor: CanonicalReadCursor;
   readonly registeredAt?: number;
@@ -265,12 +298,27 @@ export interface ConsumerRegistrationRequest {
 export interface ConsumerBinding {
   readonly consumerId: string;
   readonly configurationDigest: string;
+  readonly projectionTablePrefix: string;
+}
+
+function snapshotConsumerBinding(binding: ConsumerBinding): Readonly<ConsumerBinding> {
+  if (typeof binding !== 'object' || binding === null) {
+    throw new TypeError('consumer binding must be an object');
+  }
+  const consumerId = binding.consumerId;
+  const configurationDigest = binding.configurationDigest;
+  const projectionTablePrefix = binding.projectionTablePrefix;
+  validateConsumerId(consumerId);
+  validateConfigurationDigest(configurationDigest);
+  validateProjectionTablePrefix(projectionTablePrefix);
+  return Object.freeze({ consumerId, configurationDigest, projectionTablePrefix });
 }
 
 export interface DurableConsumerRegistration {
   readonly schemaVersion: typeof CONSUMER_SCHEMA_VERSION;
   readonly consumerId: string;
   readonly configurationDigest: string;
+  readonly projectionTablePrefix: string;
   readonly initialCursor: CanonicalReadCursor;
   readonly initialCursorDigest: string;
   readonly registeredAt: number;
@@ -341,6 +389,8 @@ interface RegistrationRow {
   readonly consumer_id_hex: unknown;
   readonly configuration_digest: unknown;
   readonly configuration_digest_hex: unknown;
+  readonly projection_table_prefix: unknown;
+  readonly projection_table_prefix_hex: unknown;
   readonly initial_cursor_json: unknown;
   readonly initial_cursor_json_hex: unknown;
   readonly initial_cursor_digest: unknown;
@@ -408,6 +458,8 @@ const REGISTRATION_SELECT = `
          hex(consumer_id) AS consumer_id_hex,
          configuration_digest,
          hex(configuration_digest) AS configuration_digest_hex,
+         projection_table_prefix,
+         hex(projection_table_prefix) AS projection_table_prefix_hex,
          initial_cursor_json,
          hex(initial_cursor_json) AS initial_cursor_json_hex,
          initial_cursor_digest,
@@ -481,6 +533,11 @@ function registrationFromRow(row: RegistrationRow): DurableConsumerRegistration 
     'consumer registration configuration digest',
   );
   assertExactSqliteText(
+    row.projection_table_prefix,
+    row.projection_table_prefix_hex,
+    'consumer registration projection table prefix',
+  );
+  assertExactSqliteText(
     row.initial_cursor_json,
     row.initial_cursor_json_hex,
     'consumer registration initial cursor',
@@ -499,6 +556,7 @@ function registrationFromRow(row: RegistrationRow): DurableConsumerRegistration 
 
   validateConsumerId(row.consumer_id);
   validateConfigurationDigest(row.configuration_digest);
+  validateProjectionTablePrefix(row.projection_table_prefix);
   assertDigest(row.initial_cursor_digest, 'consumer initial cursor digest');
   assertDigest(row.registration_digest, 'consumer registration digest');
   const initialCursor = parseCanonicalCursorJson(
@@ -512,6 +570,7 @@ function registrationFromRow(row: RegistrationRow): DurableConsumerRegistration 
     schemaVersion: CONSUMER_SCHEMA_VERSION,
     consumerId: row.consumer_id,
     configurationDigest: row.configuration_digest,
+    projectionTablePrefix: row.projection_table_prefix,
     initialCursor,
     initialCursorDigest: row.initial_cursor_digest,
     registeredAt: row.registered_at,
@@ -681,7 +740,24 @@ function receiptFromRow(row: ReceiptRow): DurableConsumerReceipt {
   return Object.freeze({ ...unsigned, receiptDigest: storedReceiptDigest });
 }
 
-function validateProjectionSql(sql: unknown, mode: 'run' | 'read'): asserts sql is string {
+function assertOwnedProjectionIdentifier(
+  identifier: string,
+  projectionTablePrefix: string,
+  label: string,
+): void {
+  if (!identifier.startsWith(projectionTablePrefix)) {
+    throw new Error(
+      `${label} must belong to projection namespace ${projectionTablePrefix}`,
+    );
+  }
+}
+
+function validateProjectionSql(
+  sql: unknown,
+  mode: 'run' | 'read',
+  projectionTablePrefix: string,
+): asserts sql is string {
+  validateProjectionTablePrefix(projectionTablePrefix);
   if (typeof sql !== 'string' || sql.trim().length === 0) {
     throw new Error('projection SQL must be a non-empty string');
   }
@@ -694,13 +770,18 @@ function validateProjectionSql(sql: unknown, mode: 'run' | 'read'): asserts sql 
   if (sql.includes('--') || sql.includes('/*') || sql.includes('*/')) {
     throw new Error('projection SQL comments are not allowed; bind data as parameters');
   }
+  if (/[\'"`\[\]]/.test(sql)) {
+    throw new Error('projection SQL literals and quoted identifiers are not allowed; bind data as parameters');
+  }
+
   const trimmed = sql.trim();
   const withoutTrailing = trimmed.endsWith(';') ? trimmed.slice(0, -1).trim() : trimmed;
   if (withoutTrailing.includes(';')) {
     throw new Error('projection SQL must contain exactly one statement');
   }
-  const normalized = withoutTrailing.toLowerCase();
+  const normalized = withoutTrailing.replace(/\s+/g, ' ').trim().toLowerCase();
   const firstKeyword = normalized.match(/^([a-z]+)/)?.[1] ?? '';
+
   if (
     new Set([
       'begin',
@@ -714,6 +795,7 @@ function validateProjectionSql(sql: unknown, mode: 'run' | 'read'): asserts sql 
       'pragma',
       'vacuum',
       'reindex',
+      'analyze',
     ]).has(firstKeyword)
   ) {
     throw new Error('projection SQL cannot control transactions, attachments, or connection PRAGMAs');
@@ -726,21 +808,172 @@ function validateProjectionSql(sql: unknown, mode: 'run' | 'read'): asserts sql 
   ) {
     throw new Error('projection SQL cannot access consumer-owned or SQLite catalog state');
   }
-  if (/^create\s+virtual\s+table\b/.test(normalized) && !/\busing\s+fts5\b/.test(normalized)) {
-    throw new Error('projection virtual tables are restricted to the built-in FTS5 module');
+  if (/\b[a-z_][a-z0-9_]*\s*\.\s*[a-z_][a-z0-9_]*\b/.test(normalized)) {
+    throw new Error('projection SQL cannot use schema-qualified identifiers');
   }
-  if (mode === 'read' && !/^(select|explain)\b/.test(normalized)) {
-    throw new Error('projection read SQL must begin with SELECT or EXPLAIN');
+
+  if (mode === 'read') {
+    if (firstKeyword !== 'select') {
+      throw new Error('projection read SQL must begin with SELECT');
+    }
+    if ((normalized.match(/\bselect\b/g)?.length ?? 0) !== 1) {
+      throw new Error('projection read SQL cannot contain subqueries');
+    }
+    if (/\b(with|join|union|intersect|except)\b/.test(normalized)) {
+      throw new Error('projection read SQL cannot use CTEs, joins, or compound queries');
+    }
+    if (/\bfrom\s*\(/.test(normalized)) {
+      throw new Error('projection read SQL cannot read from a subquery');
+    }
+    const fromMatches = [...normalized.matchAll(/\bfrom\s+([a-z][a-z0-9_]*)\b/g)];
+    if (fromMatches.length > 1) {
+      throw new Error('projection read SQL can reference only one projection table');
+    }
+    if (fromMatches.length === 1) {
+      const table = fromMatches[0]?.[1];
+      if (table === undefined) throw new Error('projection read SQL table could not be parsed');
+      assertOwnedProjectionIdentifier(table, projectionTablePrefix, 'projection read table');
+      const indexedBy = normalized.match(/\bindexed\s+by\s+([a-z][a-z0-9_]*)\b/);
+      if (indexedBy !== null) {
+        assertOwnedProjectionIdentifier(
+          indexedBy[1] as string,
+          projectionTablePrefix,
+          'projection read index',
+        );
+      }
+      if (/\bfrom\s+[a-z][a-z0-9_]*(?:\s+(?:as\s+)?[a-z][a-z0-9_]*)?\s*,/.test(normalized)) {
+        throw new Error('projection read SQL cannot use comma joins');
+      }
+      if (new RegExp(`\\bfrom\\s+${table}\\s*\\(`).test(normalized)) {
+        throw new Error('projection read SQL cannot invoke table-valued functions');
+      }
+    }
+    return;
+  }
+
+  if (/\b(select|with|join|union|intersect|except)\b/.test(normalized)) {
+    throw new Error('projection write SQL cannot read from another query');
+  }
+
+  let targets: string[] = [];
+  if (firstKeyword === 'create') {
+    const virtualTable = normalized.match(
+      /^create\s+virtual\s+table\s+(?:if\s+not\s+exists\s+)?([a-z][a-z0-9_]*)\s+using\s+([a-z][a-z0-9_]*)\b/,
+    );
+    if (virtualTable !== null) {
+      if (virtualTable[2] !== 'fts5') {
+        throw new Error('projection virtual tables are restricted to the built-in FTS5 module');
+      }
+      if (/\b(content|content_rowid)\s*=/.test(normalized)) {
+        throw new Error('projection FTS5 tables cannot reference external content tables');
+      }
+      targets = [virtualTable[1] as string];
+    } else {
+      const table = normalized.match(
+        /^create\s+table\s+(?:if\s+not\s+exists\s+)?([a-z][a-z0-9_]*)\b/,
+      );
+      const index = normalized.match(
+        /^create\s+(?:unique\s+)?index\s+(?:if\s+not\s+exists\s+)?([a-z][a-z0-9_]*)\s+on\s+([a-z][a-z0-9_]*)\b/,
+      );
+      if (table !== null) targets = [table[1] as string];
+      else if (index !== null) targets = [index[1] as string, index[2] as string];
+      else throw new Error('projection CREATE is restricted to tables, FTS5 tables, and indexes');
+    }
+  } else if (firstKeyword === 'drop') {
+    const match = normalized.match(
+      /^drop\s+(?:table|index)\s+(?:if\s+exists\s+)?([a-z][a-z0-9_]*)\b/,
+    );
+    if (match === null) throw new Error('projection DROP is restricted to tables and indexes');
+    targets = [match[1] as string];
+  } else if (firstKeyword === 'alter') {
+    const match = normalized.match(/^alter\s+table\s+([a-z][a-z0-9_]*)\b/);
+    if (match === null) throw new Error('projection ALTER is restricted to tables');
+    targets = [match[1] as string];
+    const rename = normalized.match(/\brename\s+to\s+([a-z][a-z0-9_]*)\b/);
+    if (rename !== null) targets.push(rename[1] as string);
+  } else if (firstKeyword === 'insert') {
+    const match = normalized.match(
+      /^insert(?:\s+or\s+(?:rollback|abort|replace|fail|ignore))?\s+into\s+([a-z][a-z0-9_]*)\b/,
+    );
+    if (match === null) throw new Error('projection INSERT target could not be parsed');
+    targets = [match[1] as string];
+  } else if (firstKeyword === 'replace') {
+    const match = normalized.match(/^replace\s+into\s+([a-z][a-z0-9_]*)\b/);
+    if (match === null) throw new Error('projection REPLACE target could not be parsed');
+    targets = [match[1] as string];
+  } else if (firstKeyword === 'update') {
+    if (/\bfrom\b/.test(normalized)) {
+      throw new Error('projection UPDATE cannot read from another table');
+    }
+    const match = normalized.match(
+      /^update(?:\s+or\s+(?:rollback|abort|replace|fail|ignore))?\s+([a-z][a-z0-9_]*)\b/,
+    );
+    if (match === null) throw new Error('projection UPDATE target could not be parsed');
+    targets = [match[1] as string];
+  } else if (firstKeyword === 'delete') {
+    const match = normalized.match(/^delete\s+from\s+([a-z][a-z0-9_]*)\b/);
+    if (match === null) throw new Error('projection DELETE target could not be parsed');
+    targets = [match[1] as string];
+  } else {
+    throw new Error('projection write SQL uses an unsupported statement type');
+  }
+
+  for (const target of targets) {
+    assertOwnedProjectionIdentifier(target, projectionTablePrefix, 'projection SQL object');
+  }
+  for (const reference of normalized.matchAll(/\breferences\s+([a-z][a-z0-9_]*)\b/g)) {
+    const target = reference[1];
+    if (target === undefined) throw new Error('projection foreign-key target could not be parsed');
+    assertOwnedProjectionIdentifier(target, projectionTablePrefix, 'projection foreign-key target');
   }
 }
 
-function validateSqlParameters(params: readonly ConsumerSqlParameter[]): void {
+function validateSqlParameters(
+  sql: string,
+  params: readonly ConsumerSqlParameter[],
+): void {
+  if (/\?\d|[:@$][a-z_][a-z0-9_]*/i.test(sql)) {
+    throw new Error('projection SQL supports only anonymous ? parameters');
+  }
+  const placeholderCount = sql.match(/\?/g)?.length ?? 0;
+  if (placeholderCount !== params.length) {
+    throw new Error('projection SQL parameter count does not match anonymous placeholders');
+  }
+  if (params.length > MAX_PROJECTION_SQL_PARAMETERS) {
+    throw new Error(`projection SQL cannot bind more than ${MAX_PROJECTION_SQL_PARAMETERS} parameters`);
+  }
+  let totalBytes = 0;
   for (const value of params) {
-    if (typeof value === 'number' && (!Number.isFinite(value) || Object.is(value, -0))) {
-      throw new Error('projection SQL parameters must contain canonical finite numbers');
+    if (value === null) {
+      totalBytes += 1;
+    } else if (typeof value === 'number') {
+      if (!Number.isFinite(value) || Object.is(value, -0)) {
+        throw new Error('projection SQL parameters must contain canonical finite numbers');
+      }
+      totalBytes += 8;
+    } else if (typeof value === 'bigint') {
+      if (value < MIN_SQLITE_INT64 || value > MAX_SQLITE_INT64) {
+        throw new Error('projection SQL bigint parameters must fit the signed SQLite 64-bit range');
+      }
+      totalBytes += 8;
+    } else if (typeof value === 'string') {
+      if (value.includes('\u0000') || !isWellFormedUnicode(value)) {
+        throw new Error('projection SQL string parameters must be well-formed and cannot contain U+0000');
+      }
+      const bytes = new TextEncoder().encode(value).length;
+      if (bytes > MAX_PROJECTION_PARAMETER_BYTES) {
+        throw new Error(
+          `projection SQL string parameters cannot exceed ${MAX_PROJECTION_PARAMETER_BYTES} UTF-8 bytes`,
+        );
+      }
+      totalBytes += bytes;
+    } else {
+      throw new Error('projection SQL parameters must be string, number, bigint, or null');
     }
-    if (typeof value === 'string' && (value.includes('\u0000') || !isWellFormedUnicode(value))) {
-      throw new Error('projection SQL string parameters must be well-formed and cannot contain U+0000');
+    if (totalBytes > MAX_PROJECTION_PARAMETER_TOTAL_BYTES) {
+      throw new Error(
+        `projection SQL parameters cannot exceed ${MAX_PROJECTION_PARAMETER_TOTAL_BYTES} aggregate bytes`,
+      );
     }
   }
 }
@@ -756,6 +989,7 @@ function expectedColumns(): Readonly<
     [TABLE_REGISTRATIONS]: [
       ['consumer_id', 'TEXT', 1, 1],
       ['configuration_digest', 'TEXT', 1, 0],
+      ['projection_table_prefix', 'TEXT', 1, 0],
       ['initial_cursor_json', 'TEXT', 1, 0],
       ['initial_cursor_digest', 'TEXT', 1, 0],
       ['registered_at', 'INTEGER', 1, 0],
@@ -822,8 +1056,7 @@ export class SqliteConsumerCheckpointStore {
     this.#db.exec('PRAGMA synchronous = FULL');
     if (this.#fileDatabase) this.#db.exec('PRAGMA journal_mode = WAL');
     this.#initializeSchema();
-    this.#assertConnectionInvariants();
-    this.#assertSchema();
+    this.#assertOperationalBoundary();
   }
 
   #assertOpen(): void {
@@ -836,23 +1069,41 @@ export class SqliteConsumerCheckpointStore {
     }
   }
 
-  #projectionTransaction(): ConsumerProjectionTransaction {
+  #projectionTransaction(projectionTablePrefix: string): Readonly<{
+    transaction: ConsumerProjectionTransaction;
+    revoke: () => void;
+  }> {
     const database = this.#db;
-    return Object.freeze({
-      run(sql: string, ...params: readonly ConsumerSqlParameter[]): unknown {
-        validateProjectionSql(sql, 'run');
-        validateSqlParameters(params);
+    let active = true;
+    const assertActive = (): void => {
+      if (!active || !this.#applying || !database.isTransaction) {
+        throw new Error('projection transaction capability is no longer active');
+      }
+    };
+    const transaction: ConsumerProjectionTransaction = Object.freeze({
+      run: (sql: string, ...params: readonly ConsumerSqlParameter[]): unknown => {
+        assertActive();
+        validateProjectionSql(sql, 'run', projectionTablePrefix);
+        validateSqlParameters(sql, params);
         return database.prepare(sql).run(...params);
       },
-      get(sql: string, ...params: readonly ConsumerSqlParameter[]): unknown {
-        validateProjectionSql(sql, 'read');
-        validateSqlParameters(params);
+      get: (sql: string, ...params: readonly ConsumerSqlParameter[]): unknown => {
+        assertActive();
+        validateProjectionSql(sql, 'read', projectionTablePrefix);
+        validateSqlParameters(sql, params);
         return database.prepare(sql).get(...params);
       },
-      all(sql: string, ...params: readonly ConsumerSqlParameter[]): readonly unknown[] {
-        validateProjectionSql(sql, 'read');
-        validateSqlParameters(params);
+      all: (sql: string, ...params: readonly ConsumerSqlParameter[]): readonly unknown[] => {
+        assertActive();
+        validateProjectionSql(sql, 'read', projectionTablePrefix);
+        validateSqlParameters(sql, params);
         return database.prepare(sql).all(...params);
+      },
+    });
+    return Object.freeze({
+      transaction,
+      revoke: (): void => {
+        active = false;
       },
     });
   }
@@ -941,6 +1192,7 @@ export class SqliteConsumerCheckpointStore {
       CREATE TABLE IF NOT EXISTS ${TABLE_REGISTRATIONS} (
         consumer_id TEXT PRIMARY KEY,
         configuration_digest TEXT NOT NULL,
+        projection_table_prefix TEXT NOT NULL UNIQUE,
         initial_cursor_json TEXT NOT NULL,
         initial_cursor_digest TEXT NOT NULL,
         registered_at INTEGER NOT NULL CHECK (registered_at > 0),
@@ -1079,6 +1331,7 @@ export class SqliteConsumerCheckpointStore {
   #assertOperationalBoundary(): void {
     this.#assertConnectionInvariants();
     this.#assertSchema();
+    this.#registeredProjectionNamespaces();
   }
 
   #registrationRow(consumerId: string): RegistrationRow | undefined {
@@ -1099,54 +1352,144 @@ export class SqliteConsumerCheckpointStore {
       .get(consumerId, batchId) as ReceiptRow | undefined;
   }
 
+  #registeredProjectionNamespaces(): readonly DurableConsumerRegistration[] {
+    const rows = this.#db
+      .prepare(`${REGISTRATION_SELECT} ORDER BY consumer_id`)
+      .all() as unknown as readonly RegistrationRow[];
+    const registrations = rows.map((row) => registrationFromRow(row));
+    const ordered = [...registrations].sort((left, right) =>
+      left.projectionTablePrefix < right.projectionTablePrefix
+        ? -1
+        : left.projectionTablePrefix > right.projectionTablePrefix
+          ? 1
+          : 0,
+    );
+    for (let index = 1; index < ordered.length; index += 1) {
+      const previous = ordered[index - 1];
+      const current = ordered[index];
+      if (
+        previous !== undefined &&
+        current !== undefined &&
+        current.projectionTablePrefix.startsWith(previous.projectionTablePrefix)
+      ) {
+        throw new Error(
+          `projection table namespaces overlap: ${previous.projectionTablePrefix} and ${current.projectionTablePrefix}`,
+        );
+      }
+    }
+    return Object.freeze(registrations);
+  }
+
+  #assertProjectionNamespaceAvailable(projectionTablePrefix: string): void {
+    validateProjectionTablePrefix(projectionTablePrefix);
+    for (const registration of this.#registeredProjectionNamespaces()) {
+      const existing = registration.projectionTablePrefix;
+      if (
+        projectionTablePrefix.startsWith(existing) ||
+        existing.startsWith(projectionTablePrefix)
+      ) {
+        throw new Error(
+          `projectionTablePrefix overlaps registered namespace ${existing}`,
+        );
+      }
+    }
+
+    const objects = this.#db
+      .prepare(`
+        SELECT name,
+               hex(name) AS name_hex,
+               tbl_name,
+               hex(tbl_name) AS tbl_name_hex
+          FROM sqlite_master
+        UNION ALL
+        SELECT name,
+               hex(name) AS name_hex,
+               tbl_name,
+               hex(tbl_name) AS tbl_name_hex
+          FROM sqlite_temp_master
+      `)
+      .all() as unknown as readonly {
+        readonly name: unknown;
+        readonly name_hex: unknown;
+        readonly tbl_name: unknown;
+        readonly tbl_name_hex: unknown;
+      }[];
+    for (const object of objects) {
+      assertExactSqliteText(object.name, object.name_hex, 'SQLite object name');
+      assertExactSqliteText(object.tbl_name, object.tbl_name_hex, 'SQLite object table name');
+      const name = object.name.toLowerCase();
+      const tableName = object.tbl_name.toLowerCase();
+      if (name.startsWith(projectionTablePrefix) || tableName.startsWith(projectionTablePrefix)) {
+        throw new Error(
+          `projectionTablePrefix already contains SQLite object ${object.name}`,
+        );
+      }
+    }
+  }
 
   #registrationFor(binding: ConsumerBinding): DurableConsumerRegistration {
     validateConsumerId(binding.consumerId);
     validateConfigurationDigest(binding.configurationDigest);
+    validateProjectionTablePrefix(binding.projectionTablePrefix);
     const row = this.#registrationRow(binding.consumerId);
     if (row === undefined) throw new Error(`consumer is not registered: ${binding.consumerId}`);
     const registration = registrationFromRow(row);
     if (registration.configurationDigest !== binding.configurationDigest) {
       throw new Error('consumer configuration digest differs from its durable registration');
     }
+    if (registration.projectionTablePrefix !== binding.projectionTablePrefix) {
+      throw new Error('consumer projection table prefix differs from its durable registration');
+    }
     return registration;
   }
 
   register(request: ConsumerRegistrationRequest): DurableConsumerRegistration {
     this.#assertNotApplying('register');
-    validateConsumerId(request.consumerId);
-    validateConfigurationDigest(request.configurationDigest);
-    assertCanonicalReadCursor(request.initialCursor);
-    if (request.registeredAt !== undefined) {
-      assertSafePositiveInteger(request.registeredAt, 'consumer registeredAt');
+    if (typeof request !== 'object' || request === null) {
+      throw new TypeError('consumer registration request must be an object');
+    }
+    const consumerId = request.consumerId;
+    const configurationDigest = request.configurationDigest;
+    const projectionTablePrefix = request.projectionTablePrefix;
+    const suppliedInitialCursor = request.initialCursor;
+    const suppliedRegisteredAt = request.registeredAt;
+    validateConsumerId(consumerId);
+    validateConfigurationDigest(configurationDigest);
+    validateProjectionTablePrefix(projectionTablePrefix);
+    if (suppliedRegisteredAt !== undefined) {
+      assertSafePositiveInteger(suppliedRegisteredAt, 'consumer registeredAt');
     }
     const initialCursor = Object.freeze(
-      JSON.parse(stableJson(request.initialCursor)) as CanonicalReadCursor,
+      JSON.parse(stableJson(suppliedInitialCursor)) as CanonicalReadCursor,
     );
+    assertCanonicalReadCursor(initialCursor);
     const initialCursorDigest = canonicalReadCursorDigest(initialCursor);
 
     return this.#transaction('write', () => {
       this.#assertOperationalBoundary();
-      const existingRow = this.#registrationRow(request.consumerId);
+      const existingRow = this.#registrationRow(consumerId);
       if (existingRow !== undefined) {
         const existing = registrationFromRow(existingRow);
         if (
-          existing.configurationDigest !== request.configurationDigest ||
+          existing.configurationDigest !== configurationDigest ||
+          existing.projectionTablePrefix !== projectionTablePrefix ||
           existing.initialCursorDigest !== initialCursorDigest ||
           !sameCanonicalReadCursor(existing.initialCursor, initialCursor) ||
-          (request.registeredAt !== undefined && existing.registeredAt !== request.registeredAt)
+          (suppliedRegisteredAt !== undefined && existing.registeredAt !== suppliedRegisteredAt)
         ) {
           throw new Error('consumer is already registered with different durable configuration');
         }
         return existing;
       }
 
-      const registeredAt = request.registeredAt ?? Date.now();
+      this.#assertProjectionNamespaceAvailable(projectionTablePrefix);
+      const registeredAt = suppliedRegisteredAt ?? Date.now();
       assertSafePositiveInteger(registeredAt, 'consumer registeredAt');
       const unsigned = Object.freeze({
         schemaVersion: CONSUMER_SCHEMA_VERSION,
-        consumerId: request.consumerId,
-        configurationDigest: request.configurationDigest,
+        consumerId: consumerId,
+        configurationDigest: configurationDigest,
+        projectionTablePrefix: projectionTablePrefix,
         initialCursor,
         initialCursorDigest,
         registeredAt,
@@ -1158,13 +1501,15 @@ export class SqliteConsumerCheckpointStore {
       this.#db
         .prepare(`
           INSERT INTO ${TABLE_REGISTRATIONS}
-            (consumer_id, configuration_digest, initial_cursor_json,
-             initial_cursor_digest, registered_at, registration_digest)
-          VALUES (?, ?, ?, ?, ?, ?)
+            (consumer_id, configuration_digest, projection_table_prefix,
+             initial_cursor_json, initial_cursor_digest, registered_at,
+             registration_digest)
+          VALUES (?, ?, ?, ?, ?, ?, ?)
         `)
         .run(
           registration.consumerId,
           registration.configurationDigest,
+          registration.projectionTablePrefix,
           stableJson(registration.initialCursor),
           registration.initialCursorDigest,
           registration.registeredAt,
@@ -1192,7 +1537,8 @@ export class SqliteConsumerCheckpointStore {
   ): ConsumerApplyResult<T> {
     this.#assertNotApplying('apply');
     if (typeof operation !== 'function') throw new TypeError('consumer operation must be a function');
-    const registration = this.#registrationFor(binding);
+    const stableBinding = snapshotConsumerBinding(binding);
+    const registration = this.#registrationFor(stableBinding);
     this.#applying = true;
     try {
       return feed.consume(batch, (authorizedBatch) =>
@@ -1201,16 +1547,16 @@ export class SqliteConsumerCheckpointStore {
         this.#inject('after-begin');
         verifyCanonicalAppendBatch(authorizedBatch);
 
-        const liveRegistration = this.#registrationFor(binding);
+        const liveRegistration = this.#registrationFor(stableBinding);
         if (liveRegistration.registrationDigest !== registration.registrationDigest) {
           throw new Error('consumer registration changed before batch application');
         }
 
-        const existingReceiptRow = this.#receiptRow(binding.consumerId, authorizedBatch.id);
+        const existingReceiptRow = this.#receiptRow(stableBinding.consumerId, authorizedBatch.id);
         if (existingReceiptRow !== undefined) {
           const existingReceipt = receiptFromRow(existingReceiptRow);
           if (
-            existingReceipt.configurationDigest !== binding.configurationDigest ||
+            existingReceipt.configurationDigest !== stableBinding.configurationDigest ||
             existingReceipt.initialCursorDigest !== registration.initialCursorDigest ||
             !sameCanonicalReadCursor(existingReceipt.base, authorizedBatch.base) ||
             !sameCanonicalReadCursor(existingReceipt.after, authorizedBatch.after) ||
@@ -1218,11 +1564,11 @@ export class SqliteConsumerCheckpointStore {
           ) {
             throw new Error('consumer batch id already exists with different durable content');
           }
-          const checkpointRow = this.#checkpointRow(binding.consumerId);
+          const checkpointRow = this.#checkpointRow(stableBinding.consumerId);
           if (checkpointRow === undefined) throw new Error('idempotent consumer receipt has no checkpoint');
           const checkpoint = checkpointFromRow(checkpointRow);
           if (
-            checkpoint.configurationDigest !== binding.configurationDigest ||
+            checkpoint.configurationDigest !== stableBinding.configurationDigest ||
             checkpoint.initialCursorDigest !== registration.initialCursorDigest ||
             checkpoint.latestReceiptDigest !== existingReceipt.receiptDigest ||
             !sameCanonicalReadCursor(checkpoint.cursor, authorizedBatch.after)
@@ -1237,7 +1583,7 @@ export class SqliteConsumerCheckpointStore {
           });
         }
 
-        const currentRow = this.#checkpointRow(binding.consumerId);
+        const currentRow = this.#checkpointRow(stableBinding.consumerId);
         const current = currentRow === undefined ? undefined : checkpointFromRow(currentRow);
         const expectedBase = current?.cursor ?? registration.initialCursor;
         if (!sameCanonicalReadCursor(expectedBase, authorizedBatch.base)) {
@@ -1245,13 +1591,19 @@ export class SqliteConsumerCheckpointStore {
         }
         if (
           current !== undefined &&
-          (current.configurationDigest !== binding.configurationDigest ||
+          (current.configurationDigest !== stableBinding.configurationDigest ||
             current.initialCursorDigest !== registration.initialCursorDigest)
         ) {
           throw new Error('consumer checkpoint configuration differs from registration');
         }
 
-        const value = operation(this.#projectionTransaction(), authorizedBatch);
+        const capability = this.#projectionTransaction(registration.projectionTablePrefix);
+        let value: T;
+        try {
+          value = operation(capability.transaction, authorizedBatch);
+        } finally {
+          capability.revoke();
+        }
         if (
           value !== null &&
           typeof value === 'object' &&
@@ -1273,8 +1625,8 @@ export class SqliteConsumerCheckpointStore {
         assertSafePositiveInteger(appliedAt, 'consumer appliedAt');
         const unsigned = Object.freeze({
           schemaVersion: CONSUMER_SCHEMA_VERSION,
-          consumerId: binding.consumerId,
-          configurationDigest: binding.configurationDigest,
+          consumerId: stableBinding.consumerId,
+          configurationDigest: stableBinding.configurationDigest,
           initialCursorDigest: registration.initialCursorDigest,
           revision,
           batchId: authorizedBatch.id,

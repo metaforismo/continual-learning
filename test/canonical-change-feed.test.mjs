@@ -143,21 +143,28 @@ test('a tail consumer receives the complete durable delta and advances only afte
   ledger.close();
 });
 
-test('poll is stable while pending and copied batches cannot acknowledge progress', () => {
+test('poll and retry preserve the exact pending capability even if the durable tail advances', () => {
   const { ledger, verifier } = openLedger({ suffix: 'pending' });
-  const feed = CanonicalChangeFeed.open(ledger);
-  commitAppend(ledger, verifier, [], 'pending', 1, 1);
+  const feed = CanonicalChangeFeed.open(ledger, { maxBatchEvents: 1 });
+  const one = commitAppend(ledger, verifier, [], 'pending-one', 1, 1);
 
   const first = feed.poll();
   assert.ok(first);
   assert.equal(feed.poll(), first);
   assert.throws(() => feed.ack(structuredClone(first)), /outstanding capability/);
+  assert.equal(feed.retry(first), first);
+  assert.equal(feed.poll(), first);
 
-  feed.retry(first);
+  const two = commitAppend(ledger, verifier, one.all, 'pending-two', 2, 2);
+  assert.equal(feed.retry(first), first);
+  assert.equal(feed.poll(), first);
+  assert.deepEqual(first.events, one.append);
+
+  feed.ack(first);
   const second = feed.poll();
   assert.ok(second);
   assert.notEqual(second, first);
-  assert.equal(second.id, first.id);
+  assert.deepEqual(second.events, two.append);
   feed.ack(second);
   ledger.close();
 });

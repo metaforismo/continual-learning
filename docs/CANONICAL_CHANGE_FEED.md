@@ -78,8 +78,9 @@ It remains canonical delivery data that downstream state and privacy policies mu
 
 ## Pending capability and reentrancy
 
-Only one batch may be outstanding per feed instance. Repeated `poll()` calls return the same frozen
-object until it is acknowledged or retried.
+Only one batch may be outstanding per feed instance. Repeated `poll()` calls and `retry(batch)` return
+the same frozen capability until it is acknowledged or successfully consumed. Retry does not clear the
+pending delivery, reissue a structurally equal object, or widen the range to a newer durable tail.
 
 `ack`, `retry`, and `consume` accept only the exact process-local object issued by that feed. A
 structured clone with identical fields is not authority.
@@ -125,6 +126,7 @@ The feed fails closed on:
 - sequence gaps or transaction-time regression;
 - incomplete bounded range reads;
 - forged/copy batch acknowledgement;
+- retry that attempts to replace or widen the outstanding capability;
 - reentrant consumer mutation;
 - ledger regression behind the checkpoint.
 

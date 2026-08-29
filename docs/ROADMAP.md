@@ -36,7 +36,7 @@ Exit gate: all Level 1 evidence requirements in [EVALUATION.md](EVALUATION.md).
 - [x] checkpointed FTS5 changed-row publication, exact-prefix verification, fixed bucket manifests, and hash-chained projection checkpoints;
 - [x] evidence and transition metadata persistence through canonical event bytes;
 - [x] bounded canonical change-feed consumption with verified restart checkpoints and stable range identities;
-- [x] atomic registered projection-consumer transaction with configuration binding, receipts, and durable cursors;
+- [x] atomic registered projection-consumer transaction with configuration binding, exclusive SQL namespaces, revocable capabilities, receipts, and durable cursors;
 - O(k) authenticated startup checkpoint/recovery without genesis replay;
 - export, inspect, supersede, suppress, and forget APIs;
 - [x] deterministic semantic replay, real-process crash recovery, and persisted corruption fixtures.

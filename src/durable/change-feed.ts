@@ -522,10 +522,11 @@ export class CanonicalChangeFeed {
     return this.checkpoint();
   }
 
-  retry(batch: CanonicalAppendBatch): void {
+  retry(batch: CanonicalAppendBatch): CanonicalAppendBatch {
     this.#assertNotConsuming('retry');
     this.#assertOutstanding(batch);
-    this.#pending = undefined;
-    this.#issuedBatches.delete(batch as object);
+    // A retry is the same delivery attempt, not permission to widen the batch to a newer tail.
+    // Keep the exact issued capability pending until it is consumed or acknowledged.
+    return batch;
   }
 }

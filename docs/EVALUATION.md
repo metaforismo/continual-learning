@@ -249,5 +249,7 @@ Do not report a headline number without a machine-readable manifest and a rerunn
 
 Delivery tests must cover genesis versus explicit-tail bootstrap, multi-batch catch-up, stable batch
 identity after concurrent appends, persisted checkpoint verification, forged/copy capability
-rejection, reentrancy, configuration drift, idempotent restart, fault injection, real process crash,
-consumer-schema tampering, raw SQLite byte corruption, and independent consumer chains.
+rejection, exact pending retry after concurrent tail advancement, reentrancy, configuration drift,
+namespace overlap/cross-consumer access, leaked-capability revocation, joins/subqueries and SQL escape
+attempts, parameter bounds, single-read request/binding snapshots, idempotent restart, fault injection, real process crash, consumer-schema
+tampering, raw SQLite byte corruption, and independent consumer chains.

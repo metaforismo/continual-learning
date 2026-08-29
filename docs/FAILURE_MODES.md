@@ -145,10 +145,14 @@ These remain explicit research targets, not implementation details to hand-wave 
 |---|---|
 | New consumer silently starts at tail | Default to genesis; require explicit tail bootstrap |
 | Backlog exceeds one request budget | Emit several bounded contiguous batches, never truncate |
-| Tail advances before retry | Keep batch identity bound to the original canonical range |
+| Tail advances before retry | Preserve the exact pending batch capability and original canonical range |
 | Projection commits but cursor does not | Projection mutation, receipt, and cursor share one SQLite transaction |
 | Cursor commits but projection fails | Roll back the entire consumer transaction |
 | Projection code changes under one consumer id | Bind a durable configuration digest and reject drift |
+| Two consumers address overlapping tables | Register exclusive non-overlapping lowercase object prefixes |
+| Callback reads or writes another projection | Enforce the registered namespace on every SQL target/read |
+| Callback leaks its transaction object | Revoke the capability before callback-result inspection |
+| Callback hides access in joins/subqueries/CTEs | Reject multi-source and nested SQL at the boundary |
 | Callback mutates consumer receipts/checkpoints | Re-attest owned state and schema before publication |
-| Async callback escapes transaction lifetime | Reject Promise/thenable results |
+| Async callback escapes transaction lifetime | Revoke authority, then reject Promise/thenable results |
 | Malformed SQLite text aliases metadata | Verify raw UTF-8 bytes, storage classes, and canonical JSON |

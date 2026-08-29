@@ -83,17 +83,18 @@ The durable boundary rejects embedded NULs, ill-formed Unicode, non-canonical SQ
 
 ### Durable projection consumption
 
-A new projection consumer must register a configuration digest and explicit initial canonical cursor.
-Genesis is the safe default; starting at the current tail is an explicit history-skipping decision.
-Canonical batches are bounded, contiguous, stable across later tail advancement, and acknowledged only
-through the exact process-local capability issued by the feed.
+A new projection consumer must register a configuration digest, explicit initial canonical cursor, and
+an exclusive non-overlapping lowercase SQL-object prefix. Genesis is the safe default; starting at the
+current tail is an explicit history-skipping decision. Canonical batches are bounded and contiguous;
+`retry()` preserves the exact outstanding capability and range even when the durable tail advances.
 
 Projection mutation, durable receipt, and consumer cursor are published under one `BEGIN IMMEDIATE`
-transaction. The callback is trusted host code, must remain synchronous, and receives only a restricted
-projection transaction. Raw connection access, transaction control, PRAGMAs, catalog access, and
-SQL touching `cl_consumer_*` tables are forbidden. Consumer metadata is stored in STRICT
-tables and checked at the raw SQLite byte boundary. These controls do not sandbox projection code or
-provide distributed exactly-once delivery.
+transaction. The callback is trusted host code, must remain synchronous, and receives a revocable
+transaction-scoped capability. It may address only its registered namespace; raw connection access,
+other consumer namespaces, joins/subqueries, transaction control, PRAGMAs, catalogs, quoted SQL text,
+and `cl_consumer_*` state are forbidden. Parameters are runtime-typed and size-bounded. Consumer
+metadata is stored in STRICT tables and checked at the raw SQLite byte boundary. These controls do not
+sandbox projection code or provide distributed exactly-once delivery.
 
 ### Reversible learning
 

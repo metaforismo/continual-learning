@@ -433,10 +433,12 @@ canonical cursor N
 ```
 
 A new feed starts at genesis unless tail skipping is explicit. Consumer registration binds the
-initial completeness boundary and a configuration digest before any batch is applied. Batch identity
-is stable for one exact canonical range even when the ledger tail advances later. Projection callbacks
-run synchronously on the consumer store connection; changes to consumer-owned metadata, schema, or
-required PRAGMAs fail and roll back.
+initial completeness boundary, configuration digest, and an exclusive non-overlapping lowercase SQL
+namespace before any batch is applied. Batch identity is stable for one exact canonical range even when
+the ledger tail advances later; retry preserves the same outstanding capability. Projection callbacks
+run synchronously through a revocable namespace-scoped capability. Cross-consumer SQL, joins,
+subqueries, transaction control, metadata mutation, schema drift, or required-PRAGMA drift fail and
+roll back.
 
 The consumer cursor is derived-state metadata, not canonical truth. Losing a projection database may
 require replay from its registered initial cursor, but it never authorizes rewriting the canonical
