@@ -18,6 +18,9 @@ The project treats the following as first-class threats:
 - malicious or compromised subagents poisoning shared memory;
 - reward hacking and self-confirming learning loops;
 - concurrent write anomalies and replay inconsistency;
+- consumer bootstrap that silently skips canonical history;
+- projection code advancing offsets without the corresponding derived-state mutation;
+- configuration drift reusing an old projection checkpoint under new semantics;
 - denial of service through write storms, graph fan-out, or oversized evidence;
 - incomplete deletion across projections, indexes, caches, exports, and learned parameters.
 
@@ -77,6 +80,21 @@ the library.
 New SQLite canonical mutations require the exact cursor issued by the open ledger and the exact accepted result issued by its configured `TransitionVerifier`. Event bytes, event-chain advancement, audit, idempotency receipt, receipt-chain advancement, and cursor metadata are published under one `BEGIN IMMEDIATE` transaction. Exact retries after restart perform complete event/receipt/audit verification before returning the prior receipt.
 
 The durable boundary rejects embedded NULs, ill-formed Unicode, non-canonical SQLite UTF-8 aliases, weakened uniqueness contracts, and triggers on canonical tables. File databases require WAL and `synchronous = FULL`. These controls detect accidental or partial corruption; unkeyed hashes do not authenticate a database operator capable of coherently rewriting the entire history. Deployments handling valuable or personal state still require protected storage, signed checkpoints, authenticated actors, backups, and incident recovery.
+
+### Durable projection consumption
+
+A new projection consumer must register a configuration digest, explicit initial canonical cursor, and
+an exclusive non-overlapping lowercase SQL-object prefix. Genesis is the safe default; starting at the
+current tail is an explicit history-skipping decision. Canonical batches are bounded and contiguous;
+`retry()` preserves the exact outstanding capability and range even when the durable tail advances.
+
+Projection mutation, durable receipt, and consumer cursor are published under one `BEGIN IMMEDIATE`
+transaction. The callback is trusted host code, must remain synchronous, and receives a revocable
+transaction-scoped capability. It may address only its registered namespace; raw connection access,
+other consumer namespaces, joins/subqueries, transaction control, PRAGMAs, catalogs, quoted SQL text,
+and `cl_consumer_*` state are forbidden. Parameters are runtime-typed and size-bounded. Consumer
+metadata is stored in STRICT tables and checked at the raw SQLite byte boundary. These controls do not
+sandbox projection code or provide distributed exactly-once delivery.
 
 ### Reversible learning
 
