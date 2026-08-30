@@ -96,6 +96,14 @@ and `cl_consumer_*` state are forbidden. Parameters are runtime-typed and size-b
 metadata is stored in STRICT tables and checked at the raw SQLite byte boundary. These controls do not
 sandbox projection code or provide distributed exactly-once delivery.
 
+The FTS5 feed consumer additionally requires its consumer cursor to equal the durable canonical tail
+before current search. Restricted/deleted evidence and dependent claim text are removed transactionally;
+restoration that needs discarded plaintext requires a canonical rebuild. The projection database still
+contains structural identifiers and provenance metadata and must therefore be protected as sensitive
+metadata even when search text has been scrubbed. Selected result buckets are recomputed before
+candidate emission, but unkeyed manifests do not authenticate an operator capable of coherently
+rewriting the entire projection database.
+
 ### Reversible learning
 
 Procedures, controller versions, adapters, and context policies must support suppression and rollback.

@@ -200,6 +200,14 @@ export function canonicalReadCursorDigest(cursor: CanonicalReadCursor): string {
   return digest({ domain: 'cl-consumer-cursor-v1', cursor });
 }
 
+export function canonicalReadCursorForEvents(
+  events: readonly MemoryEvent[],
+): CanonicalReadCursor {
+  if (!Array.isArray(events)) throw new TypeError('canonical events must be an array');
+  const snapshot = canonicalClone(Array.from(events));
+  return advanceCursor(canonicalGenesisCursor(), snapshot);
+}
+
 function advanceCursor(
   base: CanonicalReadCursor,
   events: readonly MemoryEvent[],

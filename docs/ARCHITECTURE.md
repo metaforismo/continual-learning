@@ -443,3 +443,20 @@ roll back.
 The consumer cursor is derived-state metadata, not canonical truth. Losing a projection database may
 require replay from its registered initial cursor, but it never authorizes rewriting the canonical
 ledger.
+
+### Feed-driven lexical projection
+
+The FTS5 feed consumer is one concrete durable consumer. It starts at genesis and incrementally
+maintains searchable evidence/claim documents plus evidence-to-claim reverse dependencies. Privacy
+transitions remove searchable text in the same transaction as the consumer receipt and cursor.
+Restoration that would require discarded plaintext fails with an explicit rebuild-required verdict.
+
+Search is bound to the feed's current durable tail: an internally consistent projection that is behind
+canonical memory emits no candidates. Returned rows remain addresses only and must be canonically
+rehydrated before state adjudication or context materialization. Selected candidate buckets are
+recomputed against their stored manifests so coherent document+FTS-row corruption cannot silently
+become a hit under an unchanged manifest.
+
+The update path is incremental, but canonical rehydration is still a lifetime-history operation in v1.
+A later canonical object-read index must remove that `O(N)` read-path dependency without promoting the
+FTS cache into canonical truth.

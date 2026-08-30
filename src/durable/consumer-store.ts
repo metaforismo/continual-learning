@@ -373,15 +373,22 @@ export interface ConsumerCheckpointAudit {
 
 export type ConsumerSqlParameter = string | number | bigint | null;
 
-export interface ConsumerProjectionTransaction {
-  run(sql: string, ...params: readonly ConsumerSqlParameter[]): unknown;
+export interface ConsumerProjectionReadTransaction {
   get(sql: string, ...params: readonly ConsumerSqlParameter[]): unknown;
   all(sql: string, ...params: readonly ConsumerSqlParameter[]): readonly unknown[];
+}
+
+export interface ConsumerProjectionTransaction extends ConsumerProjectionReadTransaction {
+  run(sql: string, ...params: readonly ConsumerSqlParameter[]): unknown;
 }
 
 export type TrustedConsumerTransaction<T> = (
   transaction: ConsumerProjectionTransaction,
   batch: CanonicalAppendBatch,
+) => T;
+
+export type TrustedConsumerReadTransaction<T> = (
+  transaction: ConsumerProjectionReadTransaction,
 ) => T;
 
 interface RegistrationRow {
@@ -1069,6 +1076,39 @@ export class SqliteConsumerCheckpointStore {
     }
   }
 
+  #projectionReadTransaction(projectionTablePrefix: string): Readonly<{
+    transaction: ConsumerProjectionReadTransaction;
+    revoke: () => void;
+  }> {
+    const database = this.#db;
+    let active = true;
+    const assertActive = (): void => {
+      if (!active || !this.#applying || !database.isTransaction) {
+        throw new Error('projection read capability is no longer active');
+      }
+    };
+    const transaction: ConsumerProjectionReadTransaction = Object.freeze({
+      get: (sql: string, ...params: readonly ConsumerSqlParameter[]): unknown => {
+        assertActive();
+        validateProjectionSql(sql, 'read', projectionTablePrefix);
+        validateSqlParameters(sql, params);
+        return database.prepare(sql).get(...params);
+      },
+      all: (sql: string, ...params: readonly ConsumerSqlParameter[]): readonly unknown[] => {
+        assertActive();
+        validateProjectionSql(sql, 'read', projectionTablePrefix);
+        validateSqlParameters(sql, params);
+        return database.prepare(sql).all(...params);
+      },
+    });
+    return Object.freeze({
+      transaction,
+      revoke: (): void => {
+        active = false;
+      },
+    });
+  }
+
   #projectionTransaction(projectionTablePrefix: string): Readonly<{
     transaction: ConsumerProjectionTransaction;
     revoke: () => void;
@@ -1723,6 +1763,49 @@ export class SqliteConsumerCheckpointStore {
         });
         }),
       );
+    } finally {
+      this.#applying = false;
+    }
+  }
+
+  readProjection<T>(
+    binding: ConsumerBinding,
+    operation: TrustedConsumerReadTransaction<T>,
+  ): T {
+    this.#assertNotApplying('projection read');
+    if (typeof operation !== 'function') {
+      throw new TypeError('consumer projection read operation must be a function');
+    }
+    const stableBinding = snapshotConsumerBinding(binding);
+    const registration = this.#registrationFor(stableBinding);
+    this.#applying = true;
+    try {
+      return this.#transaction('read', () => {
+        this.#assertOperationalBoundary();
+        const liveRegistration = this.#registrationFor(stableBinding);
+        if (liveRegistration.registrationDigest !== registration.registrationDigest) {
+          throw new Error('consumer registration changed before projection read');
+        }
+        const capability = this.#projectionReadTransaction(registration.projectionTablePrefix);
+        let value: T;
+        try {
+          value = operation(capability.transaction);
+        } finally {
+          capability.revoke();
+        }
+        if (
+          value !== null &&
+          typeof value === 'object' &&
+          typeof (value as { readonly then?: unknown }).then === 'function'
+        ) {
+          throw new Error('consumer projection read must be synchronous');
+        }
+        if (!this.#db.isTransaction) {
+          throw new Error('consumer projection read callback ended the outer transaction');
+        }
+        this.#assertOperationalBoundary();
+        return value;
+      });
     } finally {
       this.#applying = false;
     }
