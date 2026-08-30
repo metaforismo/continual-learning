@@ -156,3 +156,8 @@ These remain explicit research targets, not implementation details to hand-wave 
 | Callback mutates consumer receipts/checkpoints | Re-attest owned state and schema before publication |
 | Async callback escapes transaction lifetime | Revoke authority, then reject Promise/thenable results |
 | Malformed SQLite text aliases metadata | Verify raw UTF-8 bytes, storage classes, and canonical JSON |
+| Internally fresh FTS cache lags canonical tail | Bind current search to the feed's durable tail and refuse candidates until catch-up |
+| Evidence restriction leaves dependent claim text searchable | Maintain reverse dependencies and scrub source + dependent claim documents atomically |
+| Restored evidence recreates deleted plaintext from cache | Fail with rebuild-required; reacquire canonical source bytes through the rebuild path |
+| FTS shadow and document are tampered coherently | Recompute every selected document bucket against its manifest before emitting candidates |
+| Feed-driven index is incremental but rehydration scans lifetime history | Keep the limitation explicit and add a canonical object-read index before claiming large-scale bounded reads |

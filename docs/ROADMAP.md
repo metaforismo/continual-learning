@@ -37,6 +37,8 @@ Exit gate: all Level 1 evidence requirements in [EVALUATION.md](EVALUATION.md).
 - [x] evidence and transition metadata persistence through canonical event bytes;
 - [x] bounded canonical change-feed consumption with verified restart checkpoints and stable range identities;
 - [x] atomic registered projection-consumer transaction with configuration binding, exclusive SQL namespaces, revocable capabilities, receipts, and durable cursors;
+- [x] FTS5 canonical change-feed consumer with incremental reverse-dependency updates, current-tail gating, privacy scrubbing, bucket integrity checks, and rebuild-required fallback;
+- canonical object-read index for selected evidence/claim rehydration without lifetime-history scans;
 - O(k) authenticated startup checkpoint/recovery without genesis replay;
 - export, inspect, supersede, suppress, and forget APIs;
 - [x] deterministic semantic replay, real-process crash recovery, and persisted corruption fixtures.
