@@ -38,6 +38,15 @@ VerifiedApplicabilityHypothesis
 
 A structural clone is rejected wherever an issued capability is required.
 
+Public issuance also binds each logical ID to its exact output digest:
+
+```text
+same id + same digest       -> exact idempotent retry
+same id + different digest -> conflict
+```
+
+The strong process-local identity registries are bounded to 65,536 objects per type and then fail closed. They are not durable authentication and reset on process restart.
+
 ## Observation boundary
 
 `verifyApplicabilityObservation()` accepts the same treatment/control traces and intervention request used by the experience-attribution boundary. It internally obtains a new exact `VerifiedMemoryIntervention`, then binds one feature manifest to that causal observation.
@@ -64,6 +73,12 @@ This blocks outcome leakage such as adding `result:success` or a post-hoc diagno
 
 The host remains responsible for the truthfulness and completeness of its feature instrumentation. A schema digest identifies the extractor contract but is not remote attestation.
 
+## Public input boundary
+
+The exported API snapshots plain request objects and top-level arrays once before validation and digesting. Issued observation capability checks occur before the wrapper reads observation fields.
+
+This prevents stateful getters or proxies from presenting one ID/manifest to the guard and another to the core operation. The internal implementation remains a module detail; the guarded public API is the supported correctness boundary.
+
 ## Feature contract
 
 V1 features are bounded normalized strings such as:
@@ -83,7 +98,7 @@ Within one discovery or validation call:
 - one context fingerprint must map to one feature-set digest;
 - every observation must use one exact feature-schema digest.
 
-A caller cannot rerun the same experimental identity and retroactively describe it with a more favorable context manifest.
+Across discovery and held-out validation, an exact context fingerprint may recur for a different experimental unit, but it must retain the same feature-set digest. Validation cannot retroactively rewrite a discovery context with a more favorable description.
 
 ## Independence before learning
 
@@ -161,6 +176,8 @@ Held-out validation rejects reuse of any discovery:
 - experimental unit;
 - verifier source group;
 - feature-extraction schema mismatch.
+
+If an exact discovery context fingerprint is reused with a new experimental unit, the feature manifest must remain byte-identical by digest. A different manifest fails before metrics are calculated.
 
 The discovery candidate retains the complete selected source-group and unit lineage, including evidence excluded as a vote. Hidden correlated rows therefore cannot re-enter validation under another observation ID.
 
@@ -270,9 +287,21 @@ Mitigation: one exact feature-schema digest is required across the protocol.
 
 ### Retroactive context rewriting
 
-Failure: one unit/context receives different feature descriptions on repeated observations.
+Failure: one unit/context receives different feature descriptions on repeated observations or between discovery and held-out validation.
 
-Mitigation: unit and context fingerprints must each map to one feature-set digest per call.
+Mitigation: unit and context fingerprints must map to one feature-set digest, including cross-set reuse of an exact context fingerprint.
+
+### Stateful-input TOCTOU
+
+Failure: a getter presents one request/array element to a guard and another to the core operation.
+
+Mitigation: exported request objects and top-level arrays are snapshotted exactly once; forged observations are rejected before their fields are inspected.
+
+### Logical ID equivocation
+
+Failure: one observation/candidate/validation ID is reused for different content.
+
+Mitigation: same-digest retries return the original issued capability; different-digest reuse fails closed.
 
 ### Memorization through unique features
 
@@ -290,7 +319,7 @@ Mitigation: exact attribution assessment is rerun before discovery and validatio
 
 Failure: a discovery trial reappears in held-out validation through a new ID.
 
-Mitigation: comparison, unit, source-group, and schema overlap are rejected.
+Mitigation: comparison, unit, source-group, and schema overlap are rejected; exact context reuse cannot change its feature manifest.
 
 ### Majority vote over missing variables
 
@@ -327,13 +356,18 @@ V1 does not provide:
 
 Feature names may themselves reveal sensitive project state. Hosts must keep feature vocabularies within the same scope/privacy boundary as the underlying experiment and avoid embedding secrets or raw personal data in feature strings.
 
+Process-local strong ID registries are intentionally bounded. Hitting the cap rejects new identities; production hosts will need durable authenticated storage, lifecycle/retention policy, and explicit restart admission rather than increasing the in-process limit indefinitely.
+
 ## Evaluation gates
 
 Before applicability evidence feeds procedure induction, test:
 
 - pre-trial feature timing and schema binding;
 - malformed/duplicate/oversized features;
-- inconsistent unit/context manifests;
+- inconsistent unit/context manifests within and across discovery/validation;
+- single-read requests and arrays under stateful getters;
+- exact-retry idempotency and conflicting-ID rejection;
+- bounded process-local identity registries;
 - order invariance;
 - duplicate units and direct/transitive source overlap;
 - opposite directions inside one unit or source family;
