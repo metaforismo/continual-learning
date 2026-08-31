@@ -17,6 +17,9 @@ The project treats the following as first-class threats:
 - duplicated evidence inflating confidence;
 - malicious or compromised subagents poisoning shared memory;
 - reward hacking and self-confirming learning loops;
+- post-outcome context features leaking treatment success into applicability discovery;
+- discovery trials reappearing in held-out validation through copied ids, units, or source families;
+- context-feature strings exposing sensitive project, user, or tenant state;
 - concurrent write anomalies and replay inconsistency;
 - consumer bootstrap that silently skips canonical history;
 - projection code advancing offsets without the corresponding derived-state mutation;
@@ -83,6 +86,14 @@ The FTS5 feed consumer additionally requires its consumer cursor to equal the du
 
 The canonical object-read consumer also requires genesis completeness and current-tail equality. It stores canonical evidence and claim metadata, immutable transaction-time versions, evidence references, and bounded previews for evidence whose canonical record permits them. Current restriction or deletion suppresses preview content even in historical reads. Exact lookups verify state, version, head, deterministic bucket, sparse path, roots, checkpoint, and configuration. Compound address reads and claim provenance closure must remain on one cursor/revision/batch/configuration or fail closed. These controls detect partial or incoherent corruption; the sparse roots are stored inside the derived projection and therefore are not an independent trust anchor against a database operator that coherently replaces the entire projection. Such deployments require protected storage and a future separately authenticated commitment.
 
+### Applicability feature boundary
+
+Context features are host-provided metadata, not canonical facts or harmless labels. They may encode repository names, infrastructure, customer state, user attributes, failure symptoms, or other sensitive information. Hosts must keep feature vocabularies inside the same scope and privacy boundary as the attributed experiment and must not place secrets, credentials, raw personal data, or unbounded source text inside feature strings.
+
+The applicability boundary requires one feature-schema digest, timestamps the manifest before either trial arm starts, and rejects inconsistent feature manifests for the same experimental unit or context fingerprint. Discovery and held-out validation cannot reuse comparisons, units, or verifier source groups. These controls reduce post-outcome leakage and evidence duplication; they do not authenticate the feature extractor or stop a trusted host from fabricating a manifest.
+
+Applicability observations, candidates, and validations are process-local capabilities in v1. A validated rule remains non-canonical learning evidence and explicitly carries no procedure-promotion or execution authority. Durable storage, signatures, schema migration, deletion propagation, and authenticated feature instrumentation remain future boundaries.
+
 ### Reversible learning
 
 Procedures, controller versions, adapters, and context policies must support suppression and rollback.
@@ -97,6 +108,7 @@ Procedures, controller versions, adapters, and context policies must support sup
 - retention and deletion policy;
 - export and provenance inspection;
 - prompt-injection/taint and transition-verifier red-team evaluation;
+- applicability-feature schema review and sensitive-feature filtering;
 - backup and disaster-recovery process;
 - dependency and supply-chain review;
 - incident response contacts.
