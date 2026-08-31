@@ -69,6 +69,12 @@ export type MemoryUtilityAssessment = Omit<
   readonly assessmentDigest: string;
 };
 
+interface UnitObservation {
+  readonly representative: VerifiedMemoryIntervention;
+  /** Union of every verifier origin observed for this experimental identity. */
+  readonly sourceGroups: readonly string[];
+}
+
 function deepFreeze<T>(value: T): T {
   if (value !== null && typeof value === 'object' && !Object.isFrozen(value)) {
     for (const child of Object.values(value as unknown as Record<string, unknown>)) {
@@ -127,9 +133,9 @@ function hasOppositeDirections(
 }
 
 function sourceFamilyComponents(
-  comparisons: readonly VerifiedMemoryIntervention[],
-): readonly (readonly VerifiedMemoryIntervention[])[] {
-  const parent = comparisons.map((_, index) => index);
+  observations: readonly UnitObservation[],
+): readonly (readonly UnitObservation[])[] {
+  const parent = observations.map((_, index) => index);
 
   const parentAt = (index: number): number => {
     const value = parent[index];
@@ -167,23 +173,23 @@ function sourceFamilyComponents(
   };
 
   const firstBySourceGroup = new Map<string, number>();
-  for (let index = 0; index < comparisons.length; index += 1) {
-    const comparison = comparisons[index];
-    if (comparison === undefined) continue;
-    for (const sourceGroup of comparison.sourceGroups) {
+  for (let index = 0; index < observations.length; index += 1) {
+    const observation = observations[index];
+    if (observation === undefined) continue;
+    for (const sourceGroup of observation.sourceGroups) {
       const first = firstBySourceGroup.get(sourceGroup);
       if (first === undefined) firstBySourceGroup.set(sourceGroup, index);
       else union(first, index);
     }
   }
 
-  const components = new Map<number, VerifiedMemoryIntervention[]>();
-  for (let index = 0; index < comparisons.length; index += 1) {
-    const comparison = comparisons[index];
-    if (comparison === undefined) continue;
+  const components = new Map<number, UnitObservation[]>();
+  for (let index = 0; index < observations.length; index += 1) {
+    const observation = observations[index];
+    if (observation === undefined) continue;
     const root = find(index);
     const component = components.get(root) ?? [];
-    component.push(comparison);
+    component.push(observation);
     components.set(root, component);
   }
 
@@ -192,12 +198,16 @@ function sourceFamilyComponents(
       .map((component) =>
         Object.freeze(
           component.sort((left, right) =>
-            left.comparisonDigest.localeCompare(right.comparisonDigest),
+            left.representative.comparisonDigest.localeCompare(
+              right.representative.comparisonDigest,
+            ),
           ),
         ),
       )
       .sort((left, right) =>
-        (left[0]?.comparisonDigest ?? '').localeCompare(right[0]?.comparisonDigest ?? ''),
+        (left[0]?.representative.comparisonDigest ?? '').localeCompare(
+          right[0]?.representative.comparisonDigest ?? '',
+        ),
       ),
   );
 }
@@ -272,6 +282,7 @@ export function verifyMemoryIntervention(
  * Assess memory utility without making independence depend on caller order.
  *
  * - one experimental identity contributes at most one conservative observation;
+ * - duplicate observations preserve the union of their verifier-source lineage;
  * - transitive source-group overlap becomes one source-family component;
  * - opposite directions inside a unit or source-family component remain explicit conflicts;
  * - same-direction correlated observations choose the effect closest to zero, with a digest tie-break.
@@ -321,7 +332,7 @@ export function assessMemoryUtility(
     byExperimentalUnit.set(comparison.experimentalUnitDigest, group);
   }
 
-  const unitRepresentatives: VerifiedMemoryIntervention[] = [];
+  const unitObservations: UnitObservation[] = [];
   for (const [unitDigest, group] of [...byExperimentalUnit].sort(([left], [right]) =>
     left.localeCompare(right),
   )) {
@@ -331,7 +342,14 @@ export function assessMemoryUtility(
       continue;
     }
     const representative = conservativeRepresentative(group);
-    unitRepresentatives.push(representative);
+    unitObservations.push(
+      Object.freeze({
+        representative,
+        sourceGroups: Object.freeze(
+          [...new Set(group.flatMap((comparison) => comparison.sourceGroups))].sort(),
+        ),
+      }),
+    );
     for (const comparison of group) {
       if (comparison !== representative) excluded.set(comparison.id, comparison);
     }
@@ -339,20 +357,25 @@ export function assessMemoryUtility(
 
   const accepted: VerifiedMemoryIntervention[] = [];
   const conflictingSourceFamilyDigests: string[] = [];
-  for (const component of sourceFamilyComponents(unitRepresentatives)) {
-    if (hasOppositeDirections(component, policy.neutralThreshold)) {
+  for (const component of sourceFamilyComponents(unitObservations)) {
+    const componentComparisons = component.map((observation) => observation.representative);
+    if (hasOppositeDirections(componentComparisons, policy.neutralThreshold)) {
       const componentDigest = contentDigest({
         domain: 'cl-memory-source-family-conflict-v1',
-        comparisonDigests: component.map((comparison) => comparison.comparisonDigest),
-        sourceGroups: [...new Set(component.flatMap((comparison) => comparison.sourceGroups))].sort(),
+        comparisonDigests: componentComparisons.map(
+          (comparison) => comparison.comparisonDigest,
+        ),
+        sourceGroups: [
+          ...new Set(component.flatMap((observation) => observation.sourceGroups)),
+        ].sort(),
       });
       conflictingSourceFamilyDigests.push(componentDigest);
-      for (const comparison of component) excluded.set(comparison.id, comparison);
+      for (const comparison of componentComparisons) excluded.set(comparison.id, comparison);
       continue;
     }
-    const representative = conservativeRepresentative(component);
+    const representative = conservativeRepresentative(componentComparisons);
     accepted.push(representative);
-    for (const comparison of component) {
+    for (const comparison of componentComparisons) {
       if (comparison !== representative) excluded.set(comparison.id, comparison);
     }
   }
