@@ -92,11 +92,12 @@ The foundational TypeScript kernel currently includes:
 - an FTS5 canonical change-feed consumer that incrementally maintains lexical documents and reverse dependencies, scrubs restricted evidence and dependent claims, refuses stale canonical tails, and falls back to explicit rebuild when discarded plaintext would be required;
 - an authenticated, rebuildable canonical object-read projection with exact evidence/claim lookup, bitemporal versions, current privacy overlays, provenance closure, sparse integrity proofs, current-tail gating, and checkpoint-consistent compound reads without lifetime replay;
 - deterministic experience attribution that separates activated, materialized, consulted, and applied memories; binds traces to canonical outcomes and evidence; requires exact target-withheld paired interventions for causal credit; preserves complete source-family lineage across duplicate experimental units; and retains mixed, negative, neutral, and insufficient evidence without granting procedure or execution authority;
+- contextual applicability hypotheses that bind schema-versioned features before paired trials begin, reuse attribution's exact unit/source-family collapse, induce bounded required/forbidden feature rules, and require disjoint held-out validation before reporting contextual generalization;
 - a rebuildable SQLite FTS5 projection that emits addresses only, binds generations to canonical fingerprints and privacy configuration, detects row/manifest corruption, and requires canonical rehydration;
 - a checkpointed FTS5 diff publisher with exact-prefix verification, changed-row repair, privacy-filtered reverse dependencies, hash-chained checkpoints, fixed bucket manifests, and cache-independent rehydration;
 - procedure promotion gates based on independent evidence, verified outcomes, counterexample search, applicability boundaries, failure rate, and Wilson confidence bounds.
 
-The correctness kernel remains model- and harness-agnostic. The durable SQLite ledger is canonical storage; SQLite FTS5 and the canonical object-read index remain rebuildable derived projections. Experience-attribution objects are process-local learning evidence in v1, not canonical mutations or execution capabilities. No embedding provider, LLM dependency, or DeepSeek Harness coupling defines canonical memory semantics.
+The correctness kernel remains model- and harness-agnostic. The durable SQLite ledger is canonical storage; SQLite FTS5 and the canonical object-read index remain rebuildable derived projections. Experience-attribution and applicability objects are process-local learning evidence in v1, not canonical mutations, procedures, or execution capabilities. No embedding provider, LLM dependency, or DeepSeek Harness coupling defines canonical memory semantics.
 
 ## Run locally
 
@@ -107,7 +108,7 @@ npm install
 npm test
 ```
 
-The test suite currently exercises 268 foundational, state, transition, durable-ledger, change-feed, consumer-transaction, lexical-projection, selected-object-read, and experience-attribution scenarios.
+The test suite currently exercises 279 foundational, state, transition, durable-ledger, change-feed, consumer-transaction, lexical-projection, selected-object-read, experience-attribution, and contextual-applicability scenarios.
 
 ## Documentation
 
@@ -123,6 +124,7 @@ The test suite currently exercises 268 foundational, state, transition, durable-
 - [FTS5 canonical change-feed consumer](docs/FTS5_FEED_CONSUMER.md)
 - [Canonical object read index](docs/CANONICAL_OBJECT_READ_INDEX.md)
 - [Verified experience attribution](docs/EXPERIENCE_ATTRIBUTION.md)
+- [Contextual applicability hypotheses](docs/APPLICABILITY_HYPOTHESES.md)
 - [Learning contract](docs/LEARNING_CONTRACT.md)
 - [Failure modes and mitigations](docs/FAILURE_MODES.md)
 - [Evaluation and evidence ladder](docs/EVALUATION.md)
@@ -143,10 +145,11 @@ The repository does **not** currently claim:
 - production scalability;
 - benchmark superiority over existing systems;
 - causal utility from ordinary successful co-occurrence;
+- universal applicability from discovery-set fit;
 - automatic procedure promotion or tool-execution authority.
 
 Those claims must be earned independently through the evidence ladder.
 
 ## Status
 
-Foundational kernel, deterministic state adjudicator, capability-gated transition verifier, crash-safe canonical SQLite ledger, verified durable projection delivery, incremental FTS5 candidate discovery, selected canonical object rehydration, and conservative paired experience attribution. APIs may change while contextual applicability learning, durable authenticated attribution, procedure candidates, canary evaluation, artifact storage, and longitudinal benchmarks are established.
+Foundational kernel, deterministic state adjudicator, capability-gated transition verifier, crash-safe canonical SQLite ledger, verified durable projection delivery, incremental FTS5 candidate discovery, selected canonical object rehydration, conservative paired experience attribution, and held-out contextual applicability hypotheses. APIs may change while durable authenticated learning records, step-level procedure candidates, canary evaluation, artifact storage, and longitudinal benchmarks are established.
