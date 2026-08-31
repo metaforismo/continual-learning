@@ -204,6 +204,26 @@ function assertConsistentFeatureManifests(
   contextManifestMap(observations, label);
 }
 
+function assertHeldOutLineage(
+  candidate: ApplicabilityHypothesisCandidate,
+  observations: readonly VerifiedApplicabilityObservation[],
+): void {
+  const discoveryComparisons = new Set(candidate.discoveryComparisonIds);
+  const discoveryUnits = new Set(candidate.discoveryExperimentalUnitDigests);
+  const discoverySources = new Set(candidate.discoverySourceGroups);
+  for (const observation of observations) {
+    if (discoveryComparisons.has(observation.interventionId)) {
+      throw new Error('validation reuses a discovery comparison');
+    }
+    if (discoveryUnits.has(observation.experimentalUnitDigest)) {
+      throw new Error('validation reuses a discovery experimental unit');
+    }
+    if (observation.sourceGroups.some((sourceGroup) => discoverySources.has(sourceGroup))) {
+      throw new Error('validation reuses a discovery verifier source group');
+    }
+  }
+}
+
 /** Public observation boundary with single-read inputs and conflict-safe idempotency. */
 export function verifyApplicabilityObservation(
   tracesInput: readonly VerifiedExperienceTrace[],
@@ -263,7 +283,7 @@ export function induceApplicabilityHypothesis(
   return issuedCandidate;
 }
 
-/** Public held-out validation boundary with the same fail-closed input contract. */
+/** Public held-out validation boundary with deterministic contamination-guard precedence. */
 export function validateApplicabilityHypothesis(
   candidate: ApplicabilityHypothesisCandidate,
   observationsInput: readonly VerifiedApplicabilityObservation[],
@@ -287,6 +307,7 @@ export function validateApplicabilityHypothesis(
     'validation',
   );
   assertConsistentFeatureManifests(selected, 'validation');
+  assertHeldOutLineage(candidate, selected);
   for (const observation of selected) {
     const discoveryFeatureSetDigest = discoveryContextManifests.get(
       observation.contextFingerprint,
