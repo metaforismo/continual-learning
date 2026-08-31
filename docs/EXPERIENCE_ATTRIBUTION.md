@@ -131,6 +131,8 @@ canonical fingerprint
 
 Treatment and control must match on all of these correctness-relevant fields. Run IDs and outcome events must be distinct.
 
+A verified intervention derives a stronger `experimentalUnitDigest` over the raw unit plus scope, target memory, task, context, goal, runtime, verifier kind, and canonical prefix. Reusing one raw unit object in a different context therefore does not create a false duplicate.
+
 The contract cannot observe hidden variables that the host omitted from those fingerprints. It establishes a mechanically checkable minimum, not universal causal identification.
 
 ## Paired intervention
@@ -181,15 +183,19 @@ may mean M helped, was irrelevant, was selected on easy tasks, interacted with a
 
 ## Independence and conflicts
 
-Utility assessment:
+Utility assessment is deterministic and independent of caller ordering:
 
-1. groups paired comparisons by experimental-unit digest;
-2. rejects opposite effect directions for the same unit as an explicit conflict;
-3. counts at most one same-direction comparison per unit;
-4. excludes later pairs whose source groups overlap a previously accepted pair;
-5. preserves accepted, excluded, and conflicting IDs/digests in the report.
+1. group paired comparisons by the full experimental-unit digest;
+2. if one unit produces positive and negative directions, preserve an explicit unit conflict and count none of those rows as independent votes;
+3. otherwise retain at most one same-direction observation per unit, choosing the effect closest to zero and then a digest tie-break;
+4. build transitive connected components over overlapping source groups;
+5. if one source-family component produces positive and negative directions, preserve an explicit source-family conflict and count none of those rows as independent votes;
+6. otherwise retain at most one conservative observation per source-family component;
+7. sort accepted, excluded, and conflicting identities canonically before calculating the assessment digest.
 
-Opposite effects for one unit or across independent contexts are not majority-voted into a global rule. They produce `mixed`, indicating hidden conditions or missing applicability variables.
+This means reversing input arrays cannot select a more favorable pair. A chain such as `A shares origin with B`, `B shares origin with C` is one correlated source family even when A and C do not directly overlap.
+
+Opposite effects for one unit, one source family, or independent contexts are not majority-voted into a global rule. They produce `mixed`, indicating hidden conditions or missing applicability variables.
 
 ## Utility classifications
 
@@ -227,7 +233,7 @@ Independent matched interventions consistently degrade the bounded outcome score
 
 ### Mixed
 
-Direction changes across independent contexts, or the same experimental unit produces opposite directions. The correct next step is applicability discovery, not averaging into one global utility.
+Direction changes across independent contexts, inside one experimental identity, or inside one source-family component. The correct next step is applicability discovery, not averaging into one global utility.
 
 ### Neutral
 
@@ -264,10 +270,10 @@ verified experience traces
 ```text
 record trace:              O(N canonical replay/fingerprint + uses/evidence)
 verify one intervention:   O(supplied traces + memory uses)
-assess P comparisons:      O(P log P)
+assess P comparisons:      O(P log P + total source-group memberships)
 ```
 
-No latency or production-scale claim is made until machine-readable benchmarks cover increasing lifetime histories, trace counts, evidence fan-in, and repeated assessment streams.
+The source-family collapse uses disjoint-set components rather than pairwise graph scanning. No latency or production-scale claim is made until machine-readable benchmarks cover increasing lifetime histories, trace counts, evidence fan-in, and repeated assessment streams.
 
 ## Security boundary
 
@@ -292,7 +298,8 @@ Before using attribution evidence in procedure learning, evaluate:
 - target leakage into control;
 - changes in other memory use, model, tools, harness, verifier, context, goal, environment, or seed;
 - copied trace/intervention capabilities;
-- duplicate units and overlapping source groups;
+- duplicate units and direct/transitive source-group overlap;
+- order invariance under reversed and permuted input arrays;
 - positive, negative, neutral, mixed, and insufficient cases;
 - repeated nondeterministic units;
 - order/carry-over effects and repeated seeds;
