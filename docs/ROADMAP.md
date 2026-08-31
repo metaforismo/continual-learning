@@ -90,13 +90,17 @@ Exit gate: strong current-state, historical-state, premise-resistance, and conta
 - [x] pre-trial feature-schema binding and consistent unit/context manifests;
 - [x] discovery/held-out validation separation with comparison, unit, and source-family non-overlap;
 - [x] precision, recall, specificity, counterexample activation, and mean-effect validation gates;
-- [ ] candidate procedure induction with step-level canonical evidence;
-- [ ] counterexample search and independent evidence grouping for procedure steps;
+- [x] provenance-complete procedure candidates with ordered typed steps and exact step-level canonical evidence;
+- [x] immutable procedure-version identity plus evidence-bound dependencies, contraindications, verifier digest, risk, and rollback contract;
+- [x] full discovery/held-out applicability lineage preserved inside the candidate without granting promotion or execution authority;
+- [ ] procedure-specific counterexample search beyond inherited applicability evidence;
 - [ ] contextual success/failure models beyond bounded conjunction rules;
+- [ ] bounded non-executable canary plans with exact rollout-intent approval;
+- [ ] complete canary trial registry, monotonic resource meter, and fail-safe reducer;
 - [ ] procedure mixtures and conflict router;
-- [ ] staged promotion, canary use, deprecation, and rollback.
+- [ ] staged promotion, deprecation, supersession, revocation, and rollback.
 
-Next gate: `verified-procedure-candidates-v1`. A validated applicability rule must remain non-executable until ordered steps, dependencies, contraindications, risk, verification, rollback, and exact step-level canonical evidence are bound into an immutable candidate.
+Next gate: `verified-canary-plans-v1`. An exact procedure-candidate digest must remain non-executable while population, deterministic treatment/control assignment, budgets, sandbox/network/tool policy, stop rules, rollback coverage, verifier identity, independent review, and rollout-intent digest are bound into a bounded plan.
 
 Exit gate: lower same-error recurrence and positive transfer on held-out tasks without increased negative transfer.
 

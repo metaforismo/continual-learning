@@ -178,6 +178,15 @@ export interface VerifiedApplicabilityHypothesis {
   readonly status: ApplicabilityValidationStatus;
   readonly rule: ApplicabilityRule;
   readonly featureSchemaDigest: string;
+  readonly discoveryObservationIds: readonly string[];
+  readonly acceptedDiscoveryObservationIds: readonly string[];
+  readonly excludedDiscoveryObservationIds: readonly string[];
+  readonly discoveryComparisonIds: readonly string[];
+  readonly discoveryExperimentalUnitDigests: readonly string[];
+  readonly discoverySourceGroups: readonly string[];
+  readonly discoveryAssessmentDigest: string;
+  readonly discoveryMetrics: ApplicabilityMetrics;
+  readonly consideredFeatures: readonly string[];
   readonly validationObservationIds: readonly string[];
   readonly acceptedValidationObservationIds: readonly string[];
   readonly excludedValidationObservationIds: readonly string[];
@@ -1143,6 +1152,15 @@ export function validateApplicabilityHypothesis(
     status,
     rule: candidate.rule,
     featureSchemaDigest: candidate.featureSchemaDigest,
+    discoveryObservationIds: candidate.discoveryObservationIds,
+    acceptedDiscoveryObservationIds: candidate.acceptedDiscoveryObservationIds,
+    excludedDiscoveryObservationIds: candidate.excludedDiscoveryObservationIds,
+    discoveryComparisonIds: candidate.discoveryComparisonIds,
+    discoveryExperimentalUnitDigests: candidate.discoveryExperimentalUnitDigests,
+    discoverySourceGroups: candidate.discoverySourceGroups,
+    discoveryAssessmentDigest: candidate.discoveryAssessmentDigest,
+    discoveryMetrics: candidate.discoveryMetrics,
+    consideredFeatures: candidate.consideredFeatures,
     validationObservationIds: observationIds(selected),
     acceptedValidationObservationIds: observationIds(independent.accepted),
     excludedValidationObservationIds: observationIds(independent.excluded),

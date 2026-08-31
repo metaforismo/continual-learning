@@ -18,6 +18,7 @@ export {
 
 export type {
   ProcedureCandidateRisk,
+  ProcedureContraindicationInput,
   ProcedureDependencyInput,
   ProcedureDependencyKind,
   ProcedureEvidenceBinding,
@@ -32,6 +33,7 @@ export type {
   ProcedureVerifier,
   VerifiedApplicabilityBinding,
   VerifiedProcedureCandidate,
+  VerifiedProcedureContraindication,
   VerifiedProcedureCandidateInput,
   VerifiedProcedureDependency,
   VerifiedProcedureStep,
@@ -75,29 +77,62 @@ function snapshotEvents(eventsInput: readonly MemoryEvent[]): readonly MemoryEve
   return Object.freeze(Array.from(eventsInput));
 }
 
-function bindIdentity(
+function assertCompatibleIdentity(
   key: string,
   candidate: VerifiedProcedureCandidate,
   registry: Map<string, IssuedIdentity<VerifiedProcedureCandidate>>,
   label: string,
-): VerifiedProcedureCandidate {
+): IssuedIdentity<VerifiedProcedureCandidate> | undefined {
   const previous = registry.get(key);
-  if (previous === undefined) {
-    if (registry.size >= MAX_ISSUED_IDENTITIES) {
-      throw new RangeError(
-        `${label} registry cannot exceed ${MAX_ISSUED_IDENTITIES} process-local identities`,
-      );
-    }
-    registry.set(
-      key,
-      Object.freeze({ digest: candidate.candidateDigest, value: candidate }),
-    );
-    return candidate;
-  }
-  if (previous.digest !== candidate.candidateDigest) {
+  if (previous !== undefined && previous.digest !== candidate.candidateDigest) {
     throw new Error(`${label} conflicts with an already issued identity: ${key}`);
   }
-  return previous.value;
+  return previous;
+}
+
+function bindCandidateAtomically(
+  candidate: VerifiedProcedureCandidate,
+): VerifiedProcedureCandidate {
+  const versionKey = `${candidate.scope}:${candidate.procedureId}@${candidate.version}`;
+  const byId = assertCompatibleIdentity(
+    candidate.id,
+    candidate,
+    candidatesById,
+    'procedure candidate id',
+  );
+  const byVersion = assertCompatibleIdentity(
+    versionKey,
+    candidate,
+    candidatesByVersion,
+    'procedure version',
+  );
+  if (byId === undefined && candidatesById.size >= MAX_ISSUED_IDENTITIES) {
+    throw new RangeError(
+      `procedure candidate id registry cannot exceed ${MAX_ISSUED_IDENTITIES} process-local identities`,
+    );
+  }
+  if (byVersion === undefined && candidatesByVersion.size >= MAX_ISSUED_IDENTITIES) {
+    throw new RangeError(
+      `procedure version registry cannot exceed ${MAX_ISSUED_IDENTITIES} process-local identities`,
+    );
+  }
+  const issued = byId?.value ?? byVersion?.value ?? candidate;
+  if (byId !== undefined && byVersion !== undefined && byId.digest !== byVersion.digest) {
+    throw new Error('procedure candidate id and immutable version bindings disagree');
+  }
+  if (byId === undefined) {
+    candidatesById.set(
+      candidate.id,
+      Object.freeze({ digest: candidate.candidateDigest, value: issued }),
+    );
+  }
+  if (byVersion === undefined) {
+    candidatesByVersion.set(
+      versionKey,
+      Object.freeze({ digest: candidate.candidateDigest, value: issued }),
+    );
+  }
+  return issued;
 }
 
 /**
@@ -121,16 +156,5 @@ export function createVerifiedProcedureCandidate(
   if (!isIssuedCandidateCore(candidate)) {
     throw new Error('procedure candidate core did not issue a capability');
   }
-  const byId = bindIdentity(candidate.id, candidate, candidatesById, 'procedure candidate id');
-  const versionKey = `${candidate.scope}:${candidate.procedureId}@${candidate.version}`;
-  const byVersion = bindIdentity(
-    versionKey,
-    candidate,
-    candidatesByVersion,
-    'procedure version',
-  );
-  if (byId.candidateDigest !== byVersion.candidateDigest) {
-    throw new Error('procedure candidate id and immutable version bindings disagree');
-  }
-  return byId;
+  return bindCandidateAtomically(candidate);
 }

@@ -69,6 +69,26 @@ A harmful memory, procedure, controller update, or adapter must be suppressible 
 
 After many updates, the system must retain the ability to acquire another new task. A frozen archive with perfect recall is not continual learning.
 
+## Procedure-candidate boundary
+
+A validated applicability rule is evidence about *when* a memory helped. It is not yet an
+executable skill. Procedural learning must pass through a separate typed candidate that preserves
+the held-out boundary and binds ordered steps, dependencies, contraindications, risk, verification,
+and rollback to exact canonical evidence.
+
+Even a provenance-complete candidate remains:
+
+```text
+status = candidate
+executable = false
+procedurePromotionAuthorized = false
+canaryPlanAuthorized = false
+executionAuthorized = false
+```
+
+Canary planning, lifecycle trust, activation, and harness execution are separate claims and require
+separate evidence.
+
 ## Measurement
 
 For task family `A`, followed by learning streams `B ... Z`, report at minimum:

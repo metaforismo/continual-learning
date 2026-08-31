@@ -32,8 +32,10 @@ const ROLLBACK_STRATEGIES = new Set(['disable-candidate', 'restore-checkpoint', 
 const MAX_INPUT_CHARACTERS = 1_000_000;
 const MAX_IDENTIFIER_CHARACTERS = 512;
 const MAX_TEXT_CHARACTERS = 4_096;
+const MAX_VERSION_CHARACTERS = 128;
 const MAX_STEPS = 32;
 const MAX_DEPENDENCIES = 64;
+const MAX_CONTRAINDICATIONS = 32;
 const MAX_EVIDENCE_PER_BINDING = 32;
 const MAX_TOTAL_EVIDENCE_REFERENCES = 512;
 const MAX_CRITERIA = 32;
@@ -89,16 +91,35 @@ export interface ProcedureDependencyInput {
   readonly id: string;
   readonly kind: ProcedureDependencyKind;
   readonly versionDigest: string;
+  readonly evidence: readonly EvidenceRef[];
 }
 
-export interface VerifiedProcedureDependency extends ProcedureDependencyInput {
+export interface VerifiedProcedureDependency {
+  readonly id: string;
+  readonly kind: ProcedureDependencyKind;
+  readonly versionDigest: string;
+  readonly evidence: readonly ProcedureEvidenceBinding[];
   readonly dependencyDigest: string;
+}
+
+export interface ProcedureContraindicationInput {
+  readonly id: string;
+  readonly condition: string;
+  readonly evidence: readonly EvidenceRef[];
+}
+
+export interface VerifiedProcedureContraindication {
+  readonly id: string;
+  readonly condition: string;
+  readonly evidence: readonly ProcedureEvidenceBinding[];
+  readonly contraindicationDigest: string;
 }
 
 export interface ProcedureVerificationContractInput {
   readonly verificationStepId: string;
   readonly verifier: ProcedureVerifier;
   readonly verifierDigest: string;
+  readonly evidence: readonly EvidenceRef[];
   readonly successCriteria: readonly string[];
   readonly failureCriteria: readonly string[];
   readonly timeoutMs: number;
@@ -106,9 +127,16 @@ export interface ProcedureVerificationContractInput {
   readonly onFailure: ProcedureFailureAction;
 }
 
-export interface ProcedureVerificationContract extends ProcedureVerificationContractInput {
+export interface ProcedureVerificationContract {
+  readonly verificationStepId: string;
+  readonly verifier: ProcedureVerifier;
+  readonly verifierDigest: string;
+  readonly evidence: readonly ProcedureEvidenceBinding[];
   readonly successCriteria: readonly string[];
   readonly failureCriteria: readonly string[];
+  readonly timeoutMs: number;
+  readonly maxAttempts: number;
+  readonly onFailure: ProcedureFailureAction;
   readonly contractDigest: string;
 }
 
@@ -134,8 +162,23 @@ export interface VerifiedApplicabilityBinding {
   readonly discoveryCandidateDigest: string;
   readonly featureSchemaDigest: string;
   readonly rule: ApplicabilityRule;
-  readonly metrics: ApplicabilityMetrics;
+  readonly discoveryObservationIds: readonly string[];
+  readonly acceptedDiscoveryObservationIds: readonly string[];
+  readonly excludedDiscoveryObservationIds: readonly string[];
+  readonly discoveryComparisonIds: readonly string[];
+  readonly discoveryExperimentalUnitDigests: readonly string[];
+  readonly discoverySourceGroups: readonly string[];
+  readonly discoveryAssessmentDigest: string;
+  readonly discoveryMetrics: ApplicabilityMetrics;
+  readonly consideredFeatures: readonly string[];
+  readonly validationObservationIds: readonly string[];
+  readonly acceptedValidationObservationIds: readonly string[];
+  readonly excludedValidationObservationIds: readonly string[];
+  readonly validationComparisonIds: readonly string[];
+  readonly validationExperimentalUnitDigests: readonly string[];
   readonly validationSourceGroups: readonly string[];
+  readonly validationAssessmentDigest: string;
+  readonly validationMetrics: ApplicabilityMetrics;
   readonly bindingDigest: string;
 }
 
@@ -149,6 +192,7 @@ export interface VerifiedProcedureCandidateInput {
   readonly rationale: string;
   readonly steps: readonly ProcedureStepInput[];
   readonly dependencies?: readonly ProcedureDependencyInput[];
+  readonly contraindications?: readonly ProcedureContraindicationInput[];
   readonly risk: ProcedureCandidateRisk;
   readonly verification: ProcedureVerificationContractInput;
   readonly rollback: ProcedureRollbackContractInput;
@@ -171,6 +215,7 @@ export interface VerifiedProcedureCandidate {
   readonly rationale: string;
   readonly steps: readonly VerifiedProcedureStep[];
   readonly dependencies: readonly VerifiedProcedureDependency[];
+  readonly contraindications: readonly VerifiedProcedureContraindication[];
   readonly risk: ProcedureCandidateRisk;
   readonly verification: ProcedureVerificationContract;
   readonly rollback: ProcedureRollbackContract;
@@ -274,7 +319,7 @@ function normalizeStrings(
     return value;
   });
   if (new Set(values).size !== values.length) throw new Error(`${label} cannot contain duplicates`);
-  return Object.freeze([...values]);
+  return Object.freeze([...values].sort());
 }
 
 function strongestSensitivity(values: readonly EvidenceSensitivity[]): EvidenceSensitivity {
@@ -287,6 +332,10 @@ function strongestSensitivity(values: readonly EvidenceSensitivity[]): EvidenceS
 
 function hasPositiveInstructionRole(roles: readonly EvidenceRole[]): boolean {
   return roles.some((role) => role === 'supports' || role === 'verifies' || role === 'constrains');
+}
+
+function hasSupportiveRole(roles: readonly EvidenceRole[]): boolean {
+  return roles.some((role) => role === 'supports' || role === 'verifies');
 }
 
 function normalizeEvidence(
@@ -334,9 +383,6 @@ function normalizeEvidence(
     if (!hasPositiveInstructionRole(roles) || roles.includes('contradicts')) {
       throw new Error(`${label} cannot use context-only or contradicting evidence`);
     }
-    if (requireVerifies && !roles.includes('verifies')) {
-      throw new Error(`${label} requires evidence with the verifies role`);
-    }
     if (projected.record.sensitivity === 'secret' || projected.record.taints.includes('secret-detected')) {
       throw new Error(`${label} cannot derive a procedure candidate from secret evidence`);
     }
@@ -352,11 +398,35 @@ function normalizeEvidence(
     bindings.push(binding);
     context.records.set(binding.sourceId, binding);
   }
+  if (requireVerifies && !bindings.some((binding) => binding.roles.includes('verifies'))) {
+    throw new Error(`${label} requires evidence with the verifies role`);
+  }
   return Object.freeze(bindings.sort((left, right) => left.sourceId.localeCompare(right.sourceId)));
+}
+
+function requireDigestBoundEvidence(
+  bindings: readonly ProcedureEvidenceBinding[],
+  digest: string,
+  label: string,
+  minimumAuthority: Authority,
+): void {
+  if (
+    !bindings.some(
+      (binding) =>
+        binding.contentHash === digest &&
+        binding.roles.includes('verifies') &&
+        AUTHORITY_RANK[binding.authority] >= AUTHORITY_RANK[minimumAuthority],
+    )
+  ) {
+    throw new Error(
+      `${label} requires verifies evidence whose content hash equals the declared digest and whose authority is ${minimumAuthority} or stronger`,
+    );
+  }
 }
 
 function normalizeDependencies(
   dependenciesInput: readonly ProcedureDependencyInput[] | undefined,
+  context: EvidenceContext,
 ): readonly VerifiedProcedureDependency[] {
   const dependencies = dependenciesInput ?? [];
   if (!Array.isArray(dependencies) || dependencies.length > MAX_DEPENDENCIES) {
@@ -376,10 +446,23 @@ function normalizeDependencies(
     const identity = `${dependency.kind}:${dependency.id}`;
     if (identities.has(identity)) throw new Error(`duplicate procedure dependency: ${identity}`);
     identities.add(identity);
+    const evidence = normalizeEvidence(
+      dependency.evidence,
+      context,
+      `procedure dependency ${identity} evidence`,
+      true,
+    );
+    requireDigestBoundEvidence(
+      evidence,
+      dependency.versionDigest,
+      `procedure dependency ${identity}`,
+      'external-source',
+    );
     const unsigned = {
       id: dependency.id,
       kind: dependency.kind,
       versionDigest: dependency.versionDigest,
+      evidence,
     };
     normalized.push(
       Object.freeze({
@@ -396,6 +479,64 @@ function normalizeDependencies(
       `${left.kind}:${left.id}`.localeCompare(`${right.kind}:${right.id}`),
     ),
   );
+}
+
+function normalizeContraindications(
+  contraindicationsInput: readonly ProcedureContraindicationInput[] | undefined,
+  context: EvidenceContext,
+): readonly VerifiedProcedureContraindication[] {
+  const contraindications = contraindicationsInput ?? [];
+  if (!Array.isArray(contraindications) || contraindications.length > MAX_CONTRAINDICATIONS) {
+    throw new Error(`procedure contraindications cannot exceed ${MAX_CONTRAINDICATIONS}`);
+  }
+  const ids = new Set<string>();
+  const normalized: VerifiedProcedureContraindication[] = [];
+  for (const contraindication of contraindications) {
+    if (typeof contraindication !== 'object' || contraindication === null) {
+      throw new Error('procedure contraindication must be an object');
+    }
+    assertText(contraindication.id, 'procedure contraindication id');
+    if (ids.has(contraindication.id)) {
+      throw new Error(`duplicate procedure contraindication: ${contraindication.id}`);
+    }
+    ids.add(contraindication.id);
+    assertText(
+      contraindication.condition,
+      `procedure contraindication ${contraindication.id} condition`,
+      MAX_TEXT_CHARACTERS,
+    );
+    const evidence = normalizeEvidence(
+      contraindication.evidence,
+      context,
+      `procedure contraindication ${contraindication.id} evidence`,
+    );
+    if (
+      !evidence.some(
+        (binding) =>
+          (binding.roles.includes('constrains') || binding.roles.includes('verifies')) &&
+          AUTHORITY_RANK[binding.authority] >= AUTHORITY_RANK['external-source'],
+      )
+    ) {
+      throw new Error(
+        `procedure contraindication ${contraindication.id} requires constrains or verifies evidence with external-source authority or stronger`,
+      );
+    }
+    const unsigned = {
+      id: contraindication.id,
+      condition: contraindication.condition,
+      evidence,
+    };
+    normalized.push(
+      Object.freeze({
+        ...unsigned,
+        contraindicationDigest: contentDigest({
+          domain: 'cl-procedure-contraindication-v1',
+          contraindication: unsigned,
+        }),
+      }),
+    );
+  }
+  return Object.freeze(normalized.sort((left, right) => left.id.localeCompare(right.id)));
 }
 
 function normalizeSteps(
@@ -438,13 +579,16 @@ function normalizeSteps(
       `procedure step ${step.id} evidence`,
       step.kind === 'verify',
     );
+    if (!evidence.some((binding) => hasSupportiveRole(binding.roles))) {
+      throw new Error(`procedure step ${step.id} requires supports or verifies evidence`);
+    }
     provisional.push(
       Object.freeze({
         id: step.id,
         kind: step.kind,
         instruction: step.instruction,
         expectedOutcome: step.expectedOutcome,
-        dependsOn: Object.freeze([...dependsOn]),
+        dependsOn: Object.freeze([...dependsOn].sort()),
         evidence,
       }),
     );
@@ -463,6 +607,7 @@ function normalizeSteps(
       .filter(
         (evidence) =>
           sourceCounts.get(evidence.sourceId) === 1 &&
+          hasSupportiveRole(evidence.roles) &&
           AUTHORITY_RANK[evidence.authority] >= AUTHORITY_RANK['external-source'],
       )
       .map((evidence) => evidence.sourceId)
@@ -504,6 +649,7 @@ function dependencyClosure(
 function normalizeVerification(
   input: ProcedureVerificationContractInput,
   steps: readonly VerifiedProcedureStep[],
+  context: EvidenceContext,
 ): ProcedureVerificationContract {
   if (typeof input !== 'object' || input === null) {
     throw new Error('procedure verification contract must be an object');
@@ -511,8 +657,39 @@ function normalizeVerification(
   assertText(input.verificationStepId, 'procedure verificationStepId');
   if (!VERIFIERS.has(input.verifier)) throw new Error('procedure verifier is invalid');
   assertDigest(input.verifierDigest, 'procedure verifierDigest');
+  const verifierEvidence = normalizeEvidence(
+    input.evidence,
+    context,
+    'procedure verifier evidence',
+    true,
+  );
+  requireDigestBoundEvidence(
+    verifierEvidence,
+    input.verifierDigest,
+    'procedure verifier',
+    input.verifier === 'human' ? 'human-explicit' : 'tool-verified',
+  );
+  if (
+    input.verifier === 'human' &&
+    !verifierEvidence.some(
+      (binding) =>
+        binding.contentHash === input.verifierDigest &&
+        binding.roles.includes('verifies') &&
+        binding.authority === 'human-explicit',
+    )
+  ) {
+    throw new Error('human procedure verifier requires exact human-explicit verifier evidence');
+  }
   const successCriteria = normalizeStrings(input.successCriteria, 'procedure success criteria', MAX_CRITERIA);
   const failureCriteria = normalizeStrings(input.failureCriteria, 'procedure failure criteria', MAX_CRITERIA);
+  const overlappingCriteria = successCriteria.filter((criterion) =>
+    failureCriteria.includes(criterion),
+  );
+  if (overlappingCriteria.length > 0) {
+    throw new Error(
+      `procedure success and failure criteria overlap: ${overlappingCriteria.join(', ')}`,
+    );
+  }
   if (!Number.isSafeInteger(input.timeoutMs) || input.timeoutMs <= 0 || input.timeoutMs > 3_600_000) {
     throw new Error('procedure verification timeoutMs must be in 1..3600000');
   }
@@ -553,6 +730,7 @@ function normalizeVerification(
     verificationStepId: input.verificationStepId,
     verifier: input.verifier,
     verifierDigest: input.verifierDigest,
+    evidence: verifierEvidence,
     successCriteria,
     failureCriteria,
     timeoutMs: input.timeoutMs,
@@ -582,13 +760,23 @@ function normalizeRollback(
   const evidence = normalizeEvidence(input.evidence, context, 'procedure rollback evidence');
   if (
     !evidence.some(
-      (binding) => AUTHORITY_RANK[binding.authority] >= AUTHORITY_RANK['external-source'],
+      (binding) =>
+        hasSupportiveRole(binding.roles) &&
+        AUTHORITY_RANK[binding.authority] >= AUTHORITY_RANK['external-source'],
     )
   ) {
-    throw new Error('procedure rollback requires external-source authority or stronger evidence');
+    throw new Error(
+      'procedure rollback requires supports or verifies evidence with external-source authority or stronger',
+    );
   }
   if (input.strategy === 'restore-checkpoint') {
     assertDigest(input.checkpointDigest, 'procedure rollback checkpointDigest');
+    requireDigestBoundEvidence(
+      evidence,
+      input.checkpointDigest,
+      'procedure rollback checkpoint',
+      'tool-verified',
+    );
   } else if (input.checkpointDigest !== undefined) {
     throw new Error('procedure rollback checkpointDigest is only valid for restore-checkpoint');
   }
@@ -617,8 +805,23 @@ function applicabilityBinding(
     discoveryCandidateDigest: applicability.candidateDigest,
     featureSchemaDigest: applicability.featureSchemaDigest,
     rule: applicability.rule,
-    metrics: applicability.validationMetrics,
+    discoveryObservationIds: applicability.discoveryObservationIds,
+    acceptedDiscoveryObservationIds: applicability.acceptedDiscoveryObservationIds,
+    excludedDiscoveryObservationIds: applicability.excludedDiscoveryObservationIds,
+    discoveryComparisonIds: applicability.discoveryComparisonIds,
+    discoveryExperimentalUnitDigests: applicability.discoveryExperimentalUnitDigests,
+    discoverySourceGroups: applicability.discoverySourceGroups,
+    discoveryAssessmentDigest: applicability.discoveryAssessmentDigest,
+    discoveryMetrics: applicability.discoveryMetrics,
+    consideredFeatures: applicability.consideredFeatures,
+    validationObservationIds: applicability.validationObservationIds,
+    acceptedValidationObservationIds: applicability.acceptedValidationObservationIds,
+    excludedValidationObservationIds: applicability.excludedValidationObservationIds,
+    validationComparisonIds: applicability.validationComparisonIds,
+    validationExperimentalUnitDigests: applicability.validationExperimentalUnitDigests,
     validationSourceGroups: applicability.validationSourceGroups,
+    validationAssessmentDigest: applicability.validationAssessmentDigest,
+    validationMetrics: applicability.validationMetrics,
   };
   return Object.freeze({
     ...unsigned,
@@ -672,6 +875,7 @@ export function createVerifiedProcedureCandidate(
   const request = canonicalSnapshot(input, 'verified procedure candidate input');
   assertText(request.id, 'procedure candidate id');
   assertText(request.procedureId, 'procedure id');
+  assertText(request.version, 'procedure version', MAX_VERSION_CHARACTERS);
   if (!VERSION_PATTERN.test(request.version)) throw new Error('procedure version is invalid');
   assertText(request.name, 'procedure name');
   assertText(request.goalSignature, 'procedure goalSignature', MAX_TEXT_CHARACTERS);
@@ -685,6 +889,15 @@ export function createVerifiedProcedureCandidate(
   assertDigest(request.canonicalFingerprint, 'procedure candidate canonicalFingerprint');
 
   const events = MemoryKernel.from(memoryEventsInput).events();
+  const latestCanonicalEvent = events.at(-1);
+  if (
+    latestCanonicalEvent !== undefined &&
+    request.recordedAt < latestCanonicalEvent.recordedAt
+  ) {
+    throw new Error(
+      'procedure candidate cannot be backdated before the canonical tail it fingerprints',
+    );
+  }
   const canonicalFingerprint = fingerprintMemoryEvents(events);
   if (request.canonicalFingerprint !== canonicalFingerprint) {
     throw new Error('procedure candidate canonical fingerprint is stale or forged');
@@ -699,15 +912,29 @@ export function createVerifiedProcedureCandidate(
   const goalEvidence = normalizeEvidence(request.goalEvidence, context, 'procedure goal evidence');
   if (
     !goalEvidence.some(
-      (binding) => AUTHORITY_RANK[binding.authority] >= AUTHORITY_RANK['external-source'],
+      (binding) =>
+        hasSupportiveRole(binding.roles) &&
+        AUTHORITY_RANK[binding.authority] >= AUTHORITY_RANK['external-source'],
     )
   ) {
-    throw new Error('procedure goal requires external-source authority or stronger evidence');
+    throw new Error(
+      'procedure goal requires supports or verifies evidence with external-source authority or stronger',
+    );
   }
   const steps = normalizeSteps(request.steps, context);
-  const dependencies = normalizeDependencies(request.dependencies);
-  const verification = normalizeVerification(request.verification, steps);
+  const dependencies = normalizeDependencies(request.dependencies, context);
+  const contraindications = normalizeContraindications(request.contraindications, context);
+  const verification = normalizeVerification(request.verification, steps, context);
   const rollback = normalizeRollback(request.rollback, context);
+  const mutatesExternalState = steps.some((step) => step.kind === 'mutate');
+  if (mutatesExternalState && request.risk === 'low') {
+    throw new Error('procedure candidates with mutate steps require medium risk or stronger');
+  }
+  if (mutatesExternalState && rollback.strategy === 'disable-candidate') {
+    throw new Error(
+      'procedure candidates with mutate steps require restore-checkpoint or manual rollback',
+    );
+  }
 
   if (request.risk === 'high' || request.risk === 'destructive') {
     if (verification.verifier !== 'human' || verification.onFailure !== 'human-review') {
@@ -732,6 +959,7 @@ export function createVerifiedProcedureCandidate(
   const sourceGroups = Object.freeze([
     ...new Set([
       ...evidenceBindings.flatMap((binding) => binding.sourceGroups),
+      ...applicability.discoverySourceGroups,
       ...applicability.validationSourceGroups,
     ]),
   ].sort());
@@ -765,6 +993,7 @@ export function createVerifiedProcedureCandidate(
     rationale: request.rationale,
     steps,
     dependencies,
+    contraindications,
     risk: request.risk,
     verification,
     rollback,

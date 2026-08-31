@@ -109,8 +109,10 @@ episodes
   -> candidate regularity
   -> counterexample search
   -> applicability hypothesis
-  -> verified trials
-  -> validated procedure
+  -> held-out validation
+  -> verified procedure candidate
+  -> bounded canary
+  -> human-reviewed lifecycle
   -> trusted skill
 ```
 
@@ -144,7 +146,7 @@ The source episodes remain intact. Promotion and deprecation are new events; the
        |                      |                      |
        +---------------+------+----------------------+
                        |
-                 procedure hypotheses
+          procedure hypotheses / candidates
                        |
                transition verification
                        |
@@ -311,15 +313,33 @@ Use interventions where possible:
 A procedure is a typed object, not only a Markdown instruction:
 
 ```text
-goal signature
-preconditions
-forbidden conditions
-steps or policy reference
-supporting episodes
-counterexamples
-success/failure statistics by context
-version and status
-activation policy
+goal signature + goal evidence
+validated required/forbidden context features
+ordered typed steps + step-local evidence
+dependency IDs + evidence-bound version digests
+contraindications + constraining evidence
+risk
+verification contract + exact verifier digest
+rollback contract + optional checkpoint digest
+discovery/held-out lineage
+immutable version + status
+```
+
+The implemented v1 procedure-candidate boundary accepts only an exact process-issued validated
+applicability capability and a current canonical fingerprint. It preserves the complete discovery
+and held-out lineage, requires every step to have a step-exclusive supportive evidence anchor,
+binds dependency/verifier/checkpoint digests to authoritative canonical evidence, and keeps
+contraindications as first-class negative knowledge. Mutating procedures cannot declare low risk or
+pretend that disabling future use rolls back an external mutation.
+
+A candidate is still only derived learning evidence:
+
+```text
+status = candidate
+executable = false
+procedurePromotionAuthorized = false
+canaryPlanAuthorized = false
+executionAuthorized = false
 ```
 
 A procedure can coexist with another procedure for a different context. The system should learn a mixture or router rather than forcing a universal rewrite.
@@ -446,7 +466,14 @@ The current kernel enforces:
 41. selected object reads verify exact current/history rows, deterministic buckets, sparse paths, and cursor-bound metadata;
 42. current evidence restriction/deletion suppresses content even in historical object views;
 43. compound address and provenance reads cannot silently mix projection checkpoints;
-44. selected-object projections remain derived and rebuildable; they never authorize canonical repair.
+44. selected-object projections remain derived and rebuildable; they never authorize canonical repair;
+45. a procedure candidate requires an exact issued, blocker-free held-out applicability validation and preserves its complete discovery/validation lineage;
+46. procedure goals and every ordered step require positive canonical support, while dependencies, verifiers, and restore checkpoints require evidence whose content hash equals the declared digest;
+47. step-local evidence cannot be replaced by one generic citation shared across every step, and the final verifier must cover the dependency closure of every preceding step;
+48. contraindications remain evidence-backed negative knowledge and success/failure criteria cannot overlap;
+49. mutating candidates cannot underdeclare low risk or use disable-only rollback, and human verifiers require exact human-explicit evidence;
+50. candidate ID and immutable procedure-version bindings are process-local, atomic, and conflict-safe;
+51. verified procedure candidates remain non-executable and grant no promotion, canary-planning, or execution authority.
 
 ## Durable delivery and projection consumption
 
