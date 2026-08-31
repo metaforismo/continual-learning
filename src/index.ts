@@ -11,3 +11,4 @@ export * from './state/index.js';
 export * from './transitions/index.js';
 export * from './retrieval/index.js';
 export * from './durable/index.js';
+export * from './learning/index.js';
