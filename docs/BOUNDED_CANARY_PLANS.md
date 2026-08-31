@@ -155,7 +155,7 @@ A mutative canary must include at least one explicit rollback trigger.
 
 ## Time, privacy, and scope
 
-The plan stores both the exact canonical event-history fingerprint and event count used during admission. A later review proves that this exact prefix still belongs to the supplied canonical history, then applies the current privacy overlay to both inherited candidate evidence and plan-construction evidence. Every evidence reference must:
+The plan stores both the exact canonical event-history fingerprint and event count used during admission. A later review proves that this exact prefix still belongs to the supplied canonical history, then applies the current privacy overlay to both inherited candidate evidence and plan-construction evidence. Plan and review timestamps must not predate the latest canonical event included in the fingerprint, preventing transaction-time backdating against a newer supplied tail. Every evidence reference must:
 
 1. have existed and been available at the plan's `recordedAt`;
 2. remain currently available;
