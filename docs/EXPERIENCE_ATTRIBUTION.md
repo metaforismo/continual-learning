@@ -6,8 +6,8 @@ A persistent agent must not collapse these statements into one claim:
 
 ```text
 memory M was activated during a successful run
-memory M entered the model context
-memory M was inspected
+memory M entered bounded context
+memory M was consulted
 memory M was applied
 memory M caused an improvement
 ```
@@ -20,27 +20,27 @@ VerifiedMemoryIntervention
 MemoryUtilityAssessment
 ```
 
-The layer is deliberately conservative. A successful trajectory may provide useful correlation, but it does not assign positive causal utility to every memory that happened to be present.
+The layer is deliberately conservative. Successful co-occurrence is retained as diagnostic correlation, but it never becomes causal credit by itself.
 
 ## Trace boundary
 
-`recordExperienceTrace()` snapshots its request once, reconstructs the exact canonical event prefix through `MemoryKernel`, and binds the trace to:
+`recordExperienceTrace()` snapshots its request once, replays the supplied canonical prefix through `MemoryKernel`, and binds the trace to:
 
-- one canonical fingerprint;
+- an exact canonical fingerprint;
 - one canonical `outcome.recorded` event;
-- exact scope, task, context, goal, and experimental unit;
-- exact model, tool, harness, and verifier-setup digests;
-- current available evidence references;
+- scope, task, context, goal, and experimental unit;
+- model, tool, harness, and verifier-setup digests;
+- exact available evidence references;
 - source groups, authorities, content hashes, and evidence roles;
 - bounded start and completion times.
 
-A stale fingerprint, unavailable evidence, scope mismatch, forged reference, future completion time, malformed runtime discriminant, sparse array, circular input, or oversized fan-in fails closed.
+A stale fingerprint, unavailable evidence, scope mismatch, forged reference, future completion time, malformed discriminant, sparse array, circular input, duplicate memory ID, or oversized fan-in fails closed.
 
-Trace recording currently replays and fingerprints the full canonical history. That correctness boundary remains `O(N)` and is not a production-scale claim.
+Trace admission currently replays and fingerprints the full canonical history. That correctness boundary remains `O(N)` and is not a production-scale claim.
 
 ## Memory-use funnel
 
-Each memory has one use record containing an exact monotonic prefix:
+Each memory carries one exact monotonic stage prefix:
 
 ```text
 activated
@@ -49,34 +49,14 @@ activated -> materialized -> consulted
 activated -> materialized -> consulted -> applied
 ```
 
-Skipping or reordering a stage is rejected. This prevents a caller from reporting only `applied` while omitting whether the memory was actually selected, materialized, and consulted.
+Skipping, reordering, or inventing a later stage is rejected.
 
-### Activated
+- `activated`: the memory entered a candidate or active set.
+- `materialized`: it entered bounded model/controller context.
+- `consulted`: the model or deterministic controller inspected or cited it.
+- `applied`: runtime instrumentation observed it contributing to the executed plan, action, or policy decision.
 
-The memory entered a candidate or active set.
-
-### Materialized
-
-The memory entered bounded model/controller context.
-
-### Consulted
-
-The model or deterministic controller inspected or cited it.
-
-### Applied
-
-Runtime instrumentation observed the memory contributing to the executed plan, action, or policy decision.
-
-Every non-applied use requires a bounded `nonUseReason`, preserving negative selection evidence such as:
-
-```text
-lost ranking competition
-out of scope
-insufficient evidence
-omitted by context budget
-consulted but rejected
-withheld by experiment
-```
+Every non-applied use requires a bounded `nonUseReason`. This preserves negative selection evidence such as budget exclusion, scope denial, insufficient evidence, ranking loss, or explicit rejection.
 
 Only this combination is eligible for causal credit:
 
@@ -85,11 +65,11 @@ terminalStage = applied
 captureMode = runtime-instrumented
 ```
 
-`host-reconstructed` and `model-reported` traces remain inspectable correlation. A model saying “I used memory X” is not runtime proof that X governed the action.
+`host-reconstructed` and `model-reported` traces remain correlation. A model saying “I used memory X” is not runtime proof that X governed an action.
 
 ## Evidence and scope
 
-Every use cites exact currently available canonical `EvidenceRef` objects. References are checked against the evidence projection for:
+Every use cites exact currently available canonical `EvidenceRef` objects. References are checked for:
 
 - source ID;
 - source groups;
@@ -99,43 +79,17 @@ Every use cites exact currently available canonical `EvidenceRef` objects. Refer
 - availability;
 - global-or-exact-scope compatibility.
 
-The layer does not convert contextual or supportive evidence into verification authority. Copies and summaries retain their inherited source groups and therefore cannot manufacture independent attribution evidence.
+The layer does not reinterpret contextual or supportive evidence as verification authority. Copies and summaries retain their inherited source groups and cannot manufacture independent attribution evidence.
 
 ## Process-local issuance
 
-Verified traces, interventions, and utility assessments are issued as process-local capabilities. A structural clone with identical JSON is rejected when a downstream operation requires an issued trace or intervention.
+Verified traces, interventions, and assessments are process-local capabilities. A structural clone with identical JSON is rejected when a downstream operation requires an issued object.
 
-This prevents arbitrary plugin/model code from fabricating an accepted-looking attribution object. It is not durable authentication: restart-safe attribution will require a future canonical re-admission protocol with authenticated recorder/controller identity, exact bytes, schema version, verifier identity, and trusted host receipts or signatures.
+This blocks arbitrary plugin/model code from fabricating an accepted-looking attribution object. It is not durable authentication. Restart-safe attribution still requires a future canonical admission protocol with authenticated recorder/controller identities, exact bytes, verifier identity, and trusted host receipts or signatures.
 
 No attribution object in v1 is a canonical memory mutation.
 
-## Experimental identity
-
-Each trace identifies:
-
-```text
-task id
-scope
-task family
-instance digest
-environment digest
-optional seed
-context fingerprint
-goal signature
-model digest
-tool digest
-harness digest
-verifier-setup digest
-canonical fingerprint
-```
-
-Treatment and control must match on all of these correctness-relevant fields. Run IDs and outcome events must be distinct.
-
-A verified intervention derives a stronger `experimentalUnitDigest` over the raw unit plus scope, target memory, task, context, goal, runtime, verifier kind, and canonical prefix. Reusing one raw unit object in a different context therefore does not create a false duplicate.
-
-The contract cannot observe hidden variables that the host omitted from those fingerprints. It establishes a mechanically checkable minimum, not universal causal identification.
-
-## Paired intervention
+## Exact paired intervention
 
 V1 supports one intervention:
 
@@ -144,17 +98,18 @@ treatment: target memory present and runtime-applied
 control:   target memory entirely withheld
 ```
 
-The control may not contain the target even as merely activated or consulted. All other memory-use digests must be identical across arms. This is stricter than comparing only applied-memory sets and avoids hidden differences in materialization or consultation.
+The target may not appear in control even as merely activated or consulted. Every other memory-use digest must be identical across arms, so hidden differences in materialization or consultation are rejected.
 
 Both arms require:
 
 - runtime-instrumented traces;
 - strongly verified `tool`, `test`, or `human` outcomes;
 - non-unknown outcomes;
+- distinct run IDs;
 - distinct canonical outcome events and evidence packets;
-- the same actual verifier kind and verifier-setup digest.
+- exact equality of scope, task, raw experimental unit, context, goal, model, tools, harness, verifier setup, canonical prefix, and verifier kind.
 
-Treatment and control may share one verifier source family inside the pair because matched arms are expected to use the same verification setup. The complete pair becomes one experimental unit. Across utility-assessment pairs, overlapping source groups are not counted as independent evidence.
+Treatment and control may share one verifier source family inside a matched pair because they are expected to use the same verification setup. The pair itself is one causal observation.
 
 Outcome contrast is explicit:
 
@@ -167,35 +122,45 @@ unknown = ineligible
 effect = treatment - control
 ```
 
-This is a bounded outcome contrast, not a claim that the score is a universal measure of utility.
+This is a bounded contrast, not a universal utility scale.
+
+## Cross-pair independence
+
+Pair validity and cross-pair independence are separate contracts.
+
+The pair verifier is strict: treatment and control must match on the full execution identity. The assessment then derives a deliberately coarser `experimentalUnitDigest` from:
+
+```text
+scope
+target memory
+raw unit digest
+context fingerprint
+goal digest
+```
+
+This prevents repeated runs of the same task instance from becoming independent votes merely because run IDs, receipts, canonical history, or verification timestamps changed. Reusing the same raw unit in a genuinely different context produces a different identity.
+
+Assessment is deterministic and independent of caller ordering:
+
+1. group comparisons by `experimentalUnitDigest`;
+2. if one unit produces positive and negative effects, preserve a unit conflict and count none of those rows as independent votes;
+3. otherwise keep at most one same-direction observation per unit, choosing the effect closest to zero and then a digest tie-break;
+4. build transitive connected components over overlapping source groups;
+5. if one source-family component produces positive and negative effects, preserve a source-family conflict and count none of those rows;
+6. otherwise keep at most one conservative observation per source-family component;
+7. sort accepted, excluded, and conflicting identities canonically before calculating the assessment digest.
+
+A chain such as `A overlaps B` and `B overlaps C` is one correlated source family even if A and C do not directly overlap. Reversing or permuting input arrays cannot select a more favorable result.
 
 ## Correlation is preserved but cannot vote
 
-An assessment reports successful applied traces as diagnostic correlation. These counts do not influence directional causal classification.
-
-For example:
+An assessment reports successful applied traces as diagnostics. These counts do not influence directional causal classification.
 
 ```text
 memory M appeared in 100 verified successful runs
 ```
 
-may mean M helped, was irrelevant, was selected on easy tasks, interacted with another memory, or was repeatedly summarized from one origin. Without a valid paired intervention the causal basis remains `none` and classification remains `insufficient`.
-
-## Independence and conflicts
-
-Utility assessment is deterministic and independent of caller ordering:
-
-1. group paired comparisons by the full experimental-unit digest;
-2. if one unit produces positive and negative directions, preserve an explicit unit conflict and count none of those rows as independent votes;
-3. otherwise retain at most one same-direction observation per unit, choosing the effect closest to zero and then a digest tie-break;
-4. build transitive connected components over overlapping source groups;
-5. if one source-family component produces positive and negative directions, preserve an explicit source-family conflict and count none of those rows as independent votes;
-6. otherwise retain at most one conservative observation per source-family component;
-7. sort accepted, excluded, and conflicting identities canonically before calculating the assessment digest.
-
-This means reversing input arrays cannot select a more favorable pair. A chain such as `A shares origin with B`, `B shares origin with C` is one correlated source family even when A and C do not directly overlap.
-
-Opposite effects for one unit, one source family, or independent contexts are not majority-voted into a global rule. They produce `mixed`, indicating hidden conditions or missing applicability variables.
+may mean M helped, was irrelevant, appeared only on easy tasks, interacted with another memory, or was repeatedly copied from one origin. Without an accepted paired intervention, `causalBasis = none` and the result remains `insufficient`.
 
 ## Utility classifications
 
@@ -221,27 +186,15 @@ opposite-direction rate <= 0.2
 neutral band = +/- 0.1
 ```
 
-These are conservative engineering defaults, not scientifically universal thresholds. Policy values are snapshotted and runtime-validated.
+These are conservative engineering defaults, not scientifically universal thresholds.
 
-### Supported positive
+- `supported-positive`: independent matched interventions consistently improve the bounded outcome.
+- `supported-negative`: they consistently degrade it; negative transfer is first-class evidence.
+- `mixed`: direction changes across independent contexts, within one unit, or inside one source family.
+- `neutral`: enough matched evidence exists but no directional threshold is cleared.
+- `insufficient`: too few independent pairs or contexts, regardless of correlated success volume.
 
-Independent matched interventions consistently improve the bounded outcome score.
-
-### Supported negative
-
-Independent matched interventions consistently degrade the bounded outcome score. This is first-class negative-transfer evidence and should eventually inform suppression, counterexample search, or deprecation.
-
-### Mixed
-
-Direction changes across independent contexts, inside one experimental identity, or inside one source-family component. The correct next step is applicability discovery, not averaging into one global utility.
-
-### Neutral
-
-Enough matched evidence exists, but it does not clear a directional threshold.
-
-### Insufficient
-
-There are too few independent pairs or contexts, even if many successful correlated traces exist.
+Mixed evidence is not majority-voted into a global rule. It signals missing applicability variables.
 
 ## No promotion or execution authority
 
@@ -252,30 +205,32 @@ procedurePromotionAuthorized = false
 executionAuthorized = false
 ```
 
-A `supported-positive` assessment is learning evidence only. It is not a procedure, not a trusted skill, and not permission to run tools. The intended future path is:
+A `supported-positive` assessment is learning evidence only. It is not a procedure, trusted skill, or tool-execution permission.
+
+The intended path is:
 
 ```text
-verified experience traces
-        -> paired attribution
-        -> context-specific utility
-        -> held-out applicability hypotheses
-        -> evidence-backed procedure candidate
-        -> bounded canary
-        -> human-reviewed lifecycle
-        -> separate harness execution authority
+verified traces
+  -> paired attribution
+  -> context-specific utility
+  -> held-out applicability hypotheses
+  -> evidence-backed procedure candidate
+  -> bounded canary
+  -> human-reviewed lifecycle
+  -> separate harness execution authority
 ```
 
 ## Complexity
 
 ```text
-record trace:              O(N canonical replay/fingerprint + uses/evidence)
-verify one intervention:   O(supplied traces + memory uses)
-assess P comparisons:      O(P log P + total source-group memberships)
+record trace:             O(N canonical replay/fingerprint + uses/evidence)
+verify one pair:          O(supplied traces + memory uses)
+assess P comparisons:     O(P log P + total source-group memberships)
 ```
 
-The source-family collapse uses disjoint-set components rather than pairwise graph scanning. No latency or production-scale claim is made until machine-readable benchmarks cover increasing lifetime histories, trace counts, evidence fan-in, and repeated assessment streams.
+Source-family collapse uses disjoint-set components rather than pairwise graph scanning. No latency or production-scale claim is made until machine-readable benchmarks cover increasing lifetime histories, trace counts, evidence fan-in, and assessment streams.
 
-## Security boundary
+## Security boundary and known limitations
 
 V1 does not provide:
 
@@ -283,29 +238,36 @@ V1 does not provide:
 - remote attestation of instrumentation;
 - proof that an `applied` hook measured genuine cognitive influence;
 - durable canonical storage of issued capabilities;
-- randomized assignment or prevention of selective experiment creation;
+- randomized assignment;
+- a complete experiment registry preventing selective trial omission;
+- carry-over or order-effect control beyond supplied identities;
 - hidden-confounder detection;
 - protection against a trusted host fabricating canonical evidence/outcomes;
 - automatic mutation of retrieval, procedure, or controller state.
 
+Process-local WeakSet issuance is a software capability boundary, not a cryptographic signature or hardware trust guarantee.
+
 ## Evaluation gates
 
-Before using attribution evidence in procedure learning, evaluate:
+Before attribution evidence can feed procedure learning, test:
 
-- exact stage-prefix validation and non-use reasons;
+- exact stage prefixes and mandatory non-use reasons;
 - stale fingerprint and unavailable-evidence rejection;
-- scope and role laundering attempts;
+- scope, role, authority, and source-group laundering;
 - target leakage into control;
 - changes in other memory use, model, tools, harness, verifier, context, goal, environment, or seed;
 - copied trace/intervention capabilities;
-- duplicate units and direct/transitive source-group overlap;
-- order invariance under reversed and permuted input arrays;
-- positive, negative, neutral, mixed, and insufficient cases;
+- duplicate units and direct/transitive source overlap;
+- order invariance under reversed and permuted inputs;
+- positive, negative, neutral, mixed, and insufficient outcomes;
 - repeated nondeterministic units;
-- order/carry-over effects and repeated seeds;
 - bounded input and adversarial JSON behavior;
-- restart behavior once durable attribution is introduced.
+- restart behavior after durable attribution exists.
 
 The allowed claim for v1 is narrow:
 
 > Directional memory utility is not assigned from successful co-occurrence. It requires strongly verified, process-issued, matched target-withheld interventions, while conflicting and duplicated evidence remains visible and non-authoritative.
+
+## Next gate
+
+`contextual-applicability-hypotheses-v1` must discover required and forbidden context features from attributed evidence, then validate them on held-out experimental units. Discovery data cannot also prove generalization.
