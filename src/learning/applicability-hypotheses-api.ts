@@ -43,6 +43,7 @@ export type {
 } from './applicability-hypotheses.js';
 
 const MAX_IDENTIFIERS = 4_096;
+const MAX_ISSUED_IDENTITIES = 65_536;
 const MAX_INPUT_CHARACTERS = 1_000_000;
 const MAX_IDENTIFIER_CHARACTERS = 512;
 
@@ -97,7 +98,7 @@ function snapshotObservations(
   const snapshot = snapshotArray(values, label);
   for (const observation of snapshot) {
     if (!isIssuedObservationCore(observation)) {
-      throw new Error(`${label} requires issued observation capabilities`);
+      throw new Error(`${label} requires an issued observation capability`);
     }
   }
   return snapshot;
@@ -123,6 +124,11 @@ function bindIdentity<T>(
 ): T {
   const previous = registry.get(id);
   if (previous === undefined) {
+    if (registry.size >= MAX_ISSUED_IDENTITIES) {
+      throw new RangeError(
+        `${label} registry cannot exceed ${MAX_ISSUED_IDENTITIES} process-local identities`,
+      );
+    }
     registry.set(id, Object.freeze({ digest, value }));
     return value;
   }
