@@ -54,7 +54,7 @@ export type VerifiedMemoryIntervention = Omit<
   CoreVerifiedMemoryIntervention,
   'independenceDigest' | 'comparisonDigest'
 > & {
-  /** Exact matched experimental identity, including context, goal, runtime, and canonical prefix. */
+  /** Conservative cross-pair identity for one task instance in one context. */
   readonly experimentalUnitDigest: string;
   readonly independenceDigest: string;
   readonly comparisonDigest: string;
@@ -69,8 +69,18 @@ export type MemoryUtilityAssessment = Omit<
   readonly assessmentDigest: string;
 };
 
+function deepFreeze<T>(value: T): T {
+  if (value !== null && typeof value === 'object' && !Object.isFrozen(value)) {
+    for (const child of Object.values(value as unknown as Record<string, unknown>)) {
+      deepFreeze(child);
+    }
+    Object.freeze(value);
+  }
+  return value;
+}
+
 function canonicalSnapshot<T>(value: T): T {
-  return Object.freeze(JSON.parse(canonicalJson(value)) as T);
+  return deepFreeze(JSON.parse(canonicalJson(value)) as T);
 }
 
 function snapshotArray<T>(value: readonly T[], label: string): readonly T[] {
@@ -121,13 +131,28 @@ function sourceFamilyComponents(
 ): readonly (readonly VerifiedMemoryIntervention[])[] {
   const parent = comparisons.map((_, index) => index);
 
+  const parentAt = (index: number): number => {
+    const value = parent[index];
+    if (value === undefined) {
+      throw new Error('source-family union-find index is out of bounds');
+    }
+    return value;
+  };
+
+  const setParent = (index: number, value: number): void => {
+    if (index < 0 || index >= parent.length) {
+      throw new Error('source-family union-find write is out of bounds');
+    }
+    parent[index] = value;
+  };
+
   const find = (index: number): number => {
     let root = index;
-    while (parent[root] !== root) root = parent[root] as number;
+    while (parentAt(root) !== root) root = parentAt(root);
     let cursor = index;
-    while (parent[cursor] !== cursor) {
-      const next = parent[cursor] as number;
-      parent[cursor] = root;
+    while (parentAt(cursor) !== cursor) {
+      const next = parentAt(cursor);
+      setParent(cursor, root);
       cursor = next;
     }
     return root;
@@ -137,8 +162,8 @@ function sourceFamilyComponents(
     const leftRoot = find(left);
     const rightRoot = find(right);
     if (leftRoot === rightRoot) return;
-    if (leftRoot < rightRoot) parent[rightRoot] = leftRoot;
-    else parent[leftRoot] = rightRoot;
+    if (leftRoot < rightRoot) setParent(rightRoot, leftRoot);
+    else setParent(leftRoot, rightRoot);
   };
 
   const firstBySourceGroup = new Map<string, number>();
@@ -190,8 +215,11 @@ function assertIssuedIntervention(
 }
 
 /**
- * Strengthen the core pair verifier with an experimental-unit identity that includes every matched
- * context relevant to causal interpretation. The returned object is a new process-local capability.
+ * Strengthen the core pair verifier with a conservative cross-pair experimental identity.
+ *
+ * Pair validity is still bound to exact task/runtime/verifier/canonical identities by the core
+ * verifier. For evidence independence, repeated trials of one raw task instance in the same
+ * context and goal remain one unit even if the ledger, run id, or verifier receipt later changes.
  */
 export function verifyMemoryIntervention(
   tracesInput: readonly VerifiedExperienceTrace[],
@@ -208,13 +236,9 @@ export function verifyMemoryIntervention(
     domain: 'cl-memory-intervention-unit-v1',
     scope: core.scope,
     memoryId: core.memoryId,
-    taskId: core.taskId,
     unitDigest: core.unitDigest,
     contextFingerprint: core.contextFingerprint,
     goalDigest: core.goalDigest,
-    runtimeDigest: core.runtimeDigest,
-    canonicalFingerprint: treatment.canonicalFingerprint,
-    verifier: treatment.verifier,
   });
   const {
     independenceDigest: _discardedIndependence,
@@ -226,18 +250,20 @@ export function verifyMemoryIntervention(
     experimentalUnitDigest,
     sourceGroups: core.sourceGroups,
   });
-  const unsigned = {
+  const comparisonDigest = contentDigest({
+    domain: 'cl-memory-intervention-v2',
+    comparison: {
+      ...base,
+      experimentalUnitDigest,
+      independenceDigest,
+    },
+  });
+  const comparison = canonicalSnapshot<VerifiedMemoryIntervention>({
     ...base,
     experimentalUnitDigest,
     independenceDigest,
-  };
-  const comparison = canonicalSnapshot({
-    ...unsigned,
-    comparisonDigest: contentDigest({
-      domain: 'cl-memory-intervention-v2',
-      comparison: unsigned,
-    }),
-  }) as VerifiedMemoryIntervention;
+    comparisonDigest,
+  });
   issuedInterventions.add(comparison as object);
   return comparison;
 }
@@ -400,12 +426,23 @@ export function assessMemoryUtility(
   const excludedComparisons = [...excluded.values()].sort((left, right) =>
     left.comparisonDigest.localeCompare(right.comparisonDigest),
   );
+  const causalBasis: MemoryUtilityAssessment['causalBasis'] =
+    accepted.length > 0 ? 'paired-intervention' : 'none';
+  const comparisonIds = Object.freeze(accepted.map((comparison) => comparison.id));
+  const excludedComparisonIds = Object.freeze(
+    excludedComparisons.map((comparison) => comparison.id),
+  );
+  const sortedConflictingUnits = Object.freeze([...conflictingUnitDigests].sort());
+  const sortedConflictingFamilies = Object.freeze(
+    [...conflictingSourceFamilyDigests].sort(),
+  );
+  const frozenBlockers = Object.freeze(blockers);
   const unsigned = {
     schemaVersion: EXPERIENCE_ATTRIBUTION_SCHEMA_VERSION,
     scope: request.scope,
     memoryId: request.memoryId,
     classification,
-    causalBasis: accepted.length > 0 ? ('paired-intervention' as const) : ('none' as const),
+    causalBasis,
     independentPairs: accepted.length,
     excludedCorrelatedPairs: excludedComparisons.length,
     conflictingExperimentalUnits: conflictingUnitDigests.length,
@@ -421,26 +458,23 @@ export function assessMemoryUtility(
     negativeWilsonLowerBound: negativeWilson,
     correlatedAppliedSuccesses: correlation.correlatedAppliedSuccesses,
     runtimeInstrumentedAppliedSuccesses: correlation.runtimeInstrumentedAppliedSuccesses,
-    comparisonIds: Object.freeze(accepted.map((comparison) => comparison.id)),
-    excludedComparisonIds: Object.freeze(
-      excludedComparisons.map((comparison) => comparison.id),
-    ),
-    conflictingUnitDigests: Object.freeze([...conflictingUnitDigests].sort()),
-    conflictingSourceFamilyDigests: Object.freeze(
-      [...conflictingSourceFamilyDigests].sort(),
-    ),
+    comparisonIds,
+    excludedComparisonIds,
+    conflictingUnitDigests: sortedConflictingUnits,
+    conflictingSourceFamilyDigests: sortedConflictingFamilies,
     correlatedTraceIds: correlation.correlatedTraceIds,
-    blockers: Object.freeze(blockers),
-    procedurePromotionAuthorized: false,
-    executionAuthorized: false,
-  } as const;
-  const assessment = canonicalSnapshot({
+    blockers: frozenBlockers,
+    procedurePromotionAuthorized: false as const,
+    executionAuthorized: false as const,
+  };
+  const assessmentDigest = contentDigest({
+    domain: 'cl-memory-utility-assessment-v2',
+    assessment: unsigned,
+  });
+  const assessment = canonicalSnapshot<MemoryUtilityAssessment>({
     ...unsigned,
-    assessmentDigest: contentDigest({
-      domain: 'cl-memory-utility-assessment-v2',
-      assessment: unsigned,
-    }),
-  }) as MemoryUtilityAssessment;
+    assessmentDigest,
+  });
   issuedAssessments.add(assessment as object);
   return assessment;
 }
