@@ -1,1 +1,1 @@
-export * from './experience-attribution.js';
+export * from './experience-attribution-api.js';
