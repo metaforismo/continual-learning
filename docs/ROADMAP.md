@@ -96,11 +96,13 @@ Exit gate: strong current-state, historical-state, premise-resistance, and conta
 - [ ] procedure-specific counterexample search beyond inherited applicability evidence;
 - [ ] contextual success/failure models beyond bounded conjunction rules;
 - [x] bounded non-executable canary plans with deterministic treatment/control assignment, exact canonical-prefix lineage, evidence-bound runtime identities, coherent budgets, safety/security stopping, rollback coverage, independent advisory review, and no scheduling or execution authority;
-- [ ] complete canary trial registry, monotonic resource meter, and fail-safe reducer;
+- [x] guarded canary host receipts for exact assignment admission, harness-bound run start/completion, cumulative cost/tool accounting, monotonic observations, complete-prefix stop evaluation, rollback evidence, and canonical outcome binding;
+- [ ] complete held-out treatment/control assessment with assignment/run/outcome coverage or explicit stopped-experiment accounting;
+- [ ] durable cross-process experiment registry, authenticated monotonic resource meter, and fail-safe reducer;
 - [ ] procedure mixtures and conflict router;
 - [ ] staged promotion, deprecation, supersession, revocation, and rollback.
 
-Next gate: `canonical-canary-trials-v1`. An exact reviewed plan must remain non-executable while canonical assignment receipts, monotonic resource meters, complete trial registration, verified outcome receipts, stop-condition evaluation, rollback evidence, and a fail-safe reducer are bound without granting automatic procedure promotion.
+Next gate: `held-out-canary-result-assessment-v1`. It must require complete assignment, run, terminal, monitoring, rollback, and outcome coverage—or explicit stopped-experiment accounting—before comparing treatment and control under a predeclared fail-safe policy. Procedure promotion remains a separate human-reviewed boundary.
 
 Exit gate: lower same-error recurrence and positive transfer on held-out tasks without increased negative transfer.
 

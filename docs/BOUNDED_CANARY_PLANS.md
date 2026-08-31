@@ -76,12 +76,12 @@ subjects
 runs
 concurrent runs
 duration
-tool calls
+total tool calls across the plan
 cost in micros
 retries per subject
 ```
 
-The subject limit must equal the exact eligible population size. Run count must be coherent with subjects and retries. Concurrency cannot exceed either subjects or runs.
+The subject limit must equal the exact eligible population size. Run count must be coherent with subjects and retries. Concurrency cannot exceed either subjects or runs. `maxToolCalls` and `maxCostMicros` are plan-wide cumulative blast-radius ceilings; individual receipts retain per-run values as well as their cumulative positions.
 
 High-risk plans are additionally constrained to:
 
@@ -92,7 +92,7 @@ at most 1 hour
 no retries
 ```
 
-These are admission ceilings, not runtime enforcement. A later host receipt protocol must prove that the actual execution stayed inside them.
+These are admission ceilings, not runtime enforcement. The separate canonical receipt boundary records observed run and cumulative cost/tool use plus explicit breaches; an authenticated host meter remains a later boundary.
 
 ## Runtime identity
 
@@ -270,7 +270,7 @@ V1 does not provide:
 - sequential-testing correction or a complete omission-resistant experiment registry;
 - outcome aggregation or procedure lifecycle promotion.
 
-Those belong to the receipt and trusted-host boundary that follows.
+Process-local validation of those externally performed actions is now implemented by [`CANONICAL_CANARY_RECEIPTS.md`](CANONICAL_CANARY_RECEIPTS.md). Authenticated cross-process scheduling, metering, completeness, and lifecycle governance remain separate future boundaries.
 
 ## Evaluation gates
 
@@ -295,4 +295,4 @@ Before plans can feed a host scheduler, test at least:
 
 ## Next gate
 
-`canonical-canary-receipts-v1` should admit authenticated host-issued receipts for assignment, bounded execution, observations, stop-condition evaluation, rollback, and verified outcomes. Receipt admission must prove exact plan binding and preserve the separation between learning evidence and host execution authority.
+`canonical-canary-receipts-v1` now admits evidence-backed, process-local records for assignment, externally granted execution, bounded run completion, observations, stop evaluation, rollback, and verified outcomes without creating host authority. The next gate is `held-out-canary-result-assessment-v1`: require complete assignment/run/outcome coverage or explicit stopped-experiment accounting before comparing treatment and control under a predeclared fail-safe policy.

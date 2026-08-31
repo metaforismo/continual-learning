@@ -356,7 +356,36 @@ procedurePromotionAuthorized = false
 executionAuthorized = false
 ```
 
-A plan therefore cannot schedule a trial, mint a runtime capability, or execute a tool. Canonical assignments, monotonic resource receipts, complete trial registration, verified outcomes, and fail-safe reduction remain the next boundary.
+A plan therefore cannot schedule a trial, mint a runtime capability, or execute a tool. If an external host acts, those actions enter the learning substrate only through the separate guarded receipt boundary below.
+
+
+### Canary host receipts
+
+The implemented receipt boundary consumes only the exact process-issued reviewed plan. It records,
+without performing, externally supplied host admission, execution grants, runner starts/completions,
+monitoring observations, stop evaluations, rollback results, and canonical outcome verification:
+
+```text
+reviewed non-executable plan
+    -> deterministic assignment admission
+    -> harness-bound runner + scheduler grant
+    -> terminal receipt + cumulative resource accounting
+    -> monotonic observation prefix
+    -> deterministic stop evaluation
+    -> rollback evidence when triggered
+    -> exact canonical outcome event
+```
+
+Every external digest must be carried by evidence from the same planned source family; a foreign
+digest cannot borrow identity from a decoy scheduler, runner, observer, verifier, or rollback record.
+The external action digest must also differ from the relevant component identity digest, preventing
+identity evidence from masquerading directly as an action receipt. The public API keeps process-local
+run, subject-attempt, concurrency, cumulative-meter, observation-prefix, and logical-identity
+registries. Core-only objects and structural clones do not become public receipt capabilities.
+
+The boundary remains observational. Every receipt keeps scheduling, execution, and procedure
+promotion authority false. It does not prove that a trusted host submitted every action or sample,
+and it does not yet compare treatment with control.
 
 A procedure can coexist with another procedure for a different context. The system should learn a mixture or router rather than forcing a universal rewrite.
 
@@ -489,7 +518,17 @@ The current kernel enforces:
 48. contraindications remain evidence-backed negative knowledge and success/failure criteria cannot overlap;
 49. mutating candidates cannot underdeclare low risk or use disable-only rollback, and human verifiers require exact human-explicit evidence;
 50. candidate ID and immutable procedure-version bindings are process-local, atomic, and conflict-safe;
-51. verified procedure candidates remain non-executable and grant no promotion, canary-planning, or execution authority.
+51. verified procedure candidates remain non-executable and grant no promotion, canary-planning, or execution authority;
+52. bounded canary plans bind the exact candidate, deterministic treatment/control population, coherent budgets and host policy, evidence-backed runtime identities, stop rules, and rollback into one immutable non-executable intent;
+53. independent plan review revalidates canonical ancestry, current privacy, reviewer independence, and source-family independence while remaining advisory and authority-negative;
+54. canary receipts require the exact issued plan/review, current canonical lineage, and current privacy availability;
+55. the exact digest-bearing evidence binding itself must remain in the planned scheduler, harness, observer, verifier, or rollback source family, and an external action digest cannot equal that component identity digest;
+56. guarded subject retries are contiguous, non-overlapping, and cannot follow a successful attempt; cumulative cost and tool-call budgets cannot be reset per run;
+57. stop evaluation consumes the complete admitted process-local observation prefix for its metric and evaluation time, while admission stops before that prefix exceeds evaluator representation bounds;
+58. canonical outcomes bind the exact run, procedure, population manifest, external verifier class, and exact verifying evidence; a human class requires exact human-explicit authority;
+59. public receipt predicates reject core-only objects and structural clones;
+60. process-local exact retries remain bound to the original canonical snapshot rather than silently rebasing onto a later tail;
+61. canary receipts remain descriptive and grant no host scheduling, procedure promotion, or execution authority.
 
 ## Durable delivery and projection consumption
 
