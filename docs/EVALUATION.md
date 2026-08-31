@@ -211,7 +211,7 @@ Allowed claim: benchmark-specific results with complete configuration and cost.
 
 ### Level 4 — cross-domain procedural learning
 
-Demonstrate lower repeat-error rates and transfer on coding, web, planning, and another non-text-only environment.
+Demonstrate lower same-error recurrence and transfer on coding, web, planning, and another non-text-only environment.
 
 Allowed claim: "the agent learns reusable procedures in these evaluated domains."
 
@@ -350,4 +350,4 @@ Store machine-readable manifests with:
 - full audit/rebuild commands;
 - canonical range-read counters.
 
-Until this protocol is run beyond small synthetic fixtures, the allowed claim is limited to: "the selected-read implementation avoids lifetime ledger replay in the tested path and enforces the documented integrity contracts." 
+Until this protocol is run beyond small synthetic fixtures, the allowed claim is limited to: "the selected-read implementation avoids lifetime ledger replay in the tested path and enforces the documented integrity contracts."
