@@ -92,7 +92,7 @@ The foundational TypeScript kernel currently includes:
 - an FTS5 canonical change-feed consumer that incrementally maintains lexical documents and reverse dependencies, scrubs restricted evidence and dependent claims, refuses stale canonical tails, and falls back to explicit rebuild when discarded plaintext would be required;
 - an authenticated, rebuildable canonical object-read projection with exact evidence/claim lookup, bitemporal versions, current privacy overlays, provenance closure, sparse integrity proofs, current-tail gating, and checkpoint-consistent compound reads without lifetime replay;
 - deterministic experience attribution that separates activated, materialized, consulted, and applied memories; binds traces to canonical outcomes and evidence; requires exact target-withheld paired interventions for causal credit; preserves complete source-family lineage across duplicate experimental units; and retains mixed, negative, neutral, and insufficient evidence without granting procedure or execution authority;
-- contextual applicability hypotheses that bind schema-versioned features before paired trials begin, reuse attribution's exact unit/source-family collapse, induce bounded required/forbidden feature rules, and require disjoint held-out validation before reporting contextual generalization;
+- contextual applicability hypotheses that bind schema-versioned features before paired trials begin, reuse attribution's exact unit/source-family collapse, prevent one unit or context fingerprint from being rewritten with a different feature manifest, induce bounded required/forbidden feature rules, and require disjoint held-out validation before reporting contextual generalization;
 - a rebuildable SQLite FTS5 projection that emits addresses only, binds generations to canonical fingerprints and privacy configuration, detects row/manifest corruption, and requires canonical rehydration;
 - a checkpointed FTS5 diff publisher with exact-prefix verification, changed-row repair, privacy-filtered reverse dependencies, hash-chained checkpoints, fixed bucket manifests, and cache-independent rehydration;
 - procedure promotion gates based on independent evidence, verified outcomes, counterexample search, applicability boundaries, failure rate, and Wilson confidence bounds.
@@ -108,7 +108,7 @@ npm install
 npm test
 ```
 
-The test suite currently exercises 279 foundational, state, transition, durable-ledger, change-feed, consumer-transaction, lexical-projection, selected-object-read, experience-attribution, and contextual-applicability scenarios.
+The test suite currently exercises 283 foundational, state, transition, durable-ledger, change-feed, consumer-transaction, lexical-projection, selected-object-read, experience-attribution, and contextual-applicability scenarios.
 
 ## Documentation
 
