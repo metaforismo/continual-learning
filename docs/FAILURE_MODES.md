@@ -31,6 +31,7 @@ The primary design goal is not maximum memory volume. It is preventing accumulat
 | State | Ghost memory | Old, transition, and current states enter one undifferentiated prompt | Current/historical/transition roles and view-specific assembly |
 | State | Implicit invalidation | A change in one slot should invalidate related assumptions | Bounded dependency propagation plus unresolved-state markers |
 | State | False certainty | Conflicting evidence is forced into one confident answer | First-class ambiguity and abstention |
+| Retrieval | Candidate treated as truth | A lexical/vector hit is injected directly as authoritative content | Candidate indexes return addresses only; selected canonical rehydration precedes adjudication and context |
 | Retrieval | Semantic crowding | Many near-duplicates displace the one target memory | Source-family collapse, diversity, conflict-aware ranking |
 | Retrieval | Lexical cue overload | Repeated surface forms dominate sparse search | Repetition caps, temporal/state-aware features, hybrid routing |
 | Retrieval | Fan-out explosion | Generic nodes activate thousands of irrelevant neighbors | Degree normalization, inhibition, hop budgets, scope filters |
@@ -38,6 +39,9 @@ The primary design goal is not maximum memory volume. It is preventing accumulat
 | Retrieval | Early irreversible compression | An omitted detail can never be recovered | Hierarchical anchors with callback to raw episodes and sources |
 | Retrieval | Cross-project bleed | A useful lesson in one repository contaminates an unrelated task | Scope hierarchy and explicit promotion to broader scopes |
 | Retrieval | Popularity lock-in | Frequently recalled memories become easier to recall regardless of value | Separate exposure from utility; exploration and counterfactual evaluation |
+| Retrieval | Stale selected object | A coherent derived object is read after canonical memory advanced | Require object-read consumer cursor equality with the feed's durable canonical tail |
+| Retrieval | Mixed compound checkpoint | Claim and evidence proofs are individually valid but come from different revisions during concurrent catch-up | Bind every bounded address set and provenance closure to one cursor, revision, batch, and configuration; otherwise fail closed and retry |
+| Retrieval | Historical absence overclaim | No version covers `knownAt`, so a missing row is incorrectly reported as proof that the identity did not exist | Fail closed until an authenticated non-membership/range proof exists |
 | Context | Context pollution | Too much relevant-but-noncritical material distracts the model | Hard budget, risk-aware selection, diversity, task-critical reservations |
 | Context | Dependency omission | A procedure enters the prompt without its caveats or evidence | Dependency closure and atomic packet groups |
 | Context | Order effects | The same packets produce different behavior under different ordering | Stable assembly policy, order randomization evals, position-aware tests |
@@ -65,6 +69,8 @@ The primary design goal is not maximum memory volume. It is preventing accumulat
 | Multi-agent | Authority confusion | One subagent's speculation becomes shared organizational truth | Actor identity, trust domains, shared-memory admission policy |
 | Multi-agent | Write storms | Many agents race to duplicate or contradict the same state | Idempotency keys, partition concurrency, deduplication, backpressure |
 | Operations | Index lag | Retrieval sees an older projection than the canonical ledger | Watermarks, freshness metadata, fallback to authoritative state |
+| Operations | Object-read row/path corruption | A direct row, interval, bucket, sparse node, or root is altered while the caller trusts a selected lookup | Per-state/version/head digests, deterministic buckets, selected sparse-path verification, and exhaustive audit |
+| Operations | Coherent whole-projection replacement | An attacker with arbitrary write access recomputes all rows and internally stored roots | Do not claim an internal root is an external trust anchor; protect storage and add a separate host-authenticated commitment in a later tranche |
 | Operations | Schema drift | Old memory objects become unreadable after upgrades | Versioned event schema, migrations, replay fixtures |
 | Operations | Unbounded maintenance | Consolidation cost grows with total history | Incremental partitions, recurrence triggers, bounded candidate regions |
 | Operations | Hidden latency tail | Multi-hop retrieval occasionally explodes | Per-stage budgets, cancellation, degraded modes, latency SLOs |
@@ -135,7 +141,8 @@ The architecture reduces risk but does not solve several research questions:
 - privacy deletion after parametric consolidation;
 - controller learning under adversarial and non-stationary feedback;
 - proving that bounded-context performance does not decay with lifetime history;
-- evaluating continual learnability over realistic month- or year-scale streams.
+- evaluating continual learnability over realistic month- or year-scale streams;
+- independently authenticating derived projection commitments without making them canonical truth.
 
 These remain explicit research targets, not implementation details to hand-wave away.
 
@@ -160,4 +167,8 @@ These remain explicit research targets, not implementation details to hand-wave 
 | Evidence restriction leaves dependent claim text searchable | Maintain reverse dependencies and scrub source + dependent claim documents atomically |
 | Restored evidence recreates deleted plaintext from cache | Fail with rebuild-required; reacquire canonical source bytes through the rebuild path |
 | FTS shadow and document are tampered coherently | Recompute every selected document bucket against its manifest before emitting candidates |
-| Feed-driven index is incremental but rehydration scans lifetime history | Keep the limitation explicit and add a canonical object-read index before claiming large-scale bounded reads |
+| Selected canonical object projection lags or forks | Require its durable consumer cursor to equal the canonical tail before returning current objects |
+| A selected row is changed without matching integrity metadata | Recompute state/version/head digests and the selected bucket-to-root sparse path before returning it |
+| Claim and evidence closure cross revisions during concurrent catch-up | Require one cursor/revision/batch/configuration across the complete result; fail closed and retry |
+| Historical lookup precedes the first stored version | Do not convert the missing covering interval into proof of historical absence |
+| Projection roots are coherently rewritten with every derived row | Treat internal roots as corruption detectors, not external trust anchors; require protected storage or a future host-authenticated commitment |

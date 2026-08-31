@@ -21,6 +21,7 @@ The project treats the following as first-class threats:
 - consumer bootstrap that silently skips canonical history;
 - projection code advancing offsets without the corresponding derived-state mutation;
 - configuration drift reusing an old projection checkpoint under new semantics;
+- mixed-cursor compound reads during concurrent projection catch-up;
 - denial of service through write storms, graph fan-out, or oversized evidence;
 - incomplete deletion across projections, indexes, caches, exports, and learned parameters.
 
@@ -58,22 +59,13 @@ Every derived object references its source evidence. Security review and deletio
 
 Every object and index entry belongs to an explicit tenant/user/project/session scope. Broader-scope promotion is a new authorized event, not an implicit side effect of retrieval frequency.
 
-
 ### Verified write capability
 
-Model/plugin code may propose operations but must not hold the canonical kernel or the
-`TransitionVerifier` commit capability. A transition is staged on an isolated kernel, bound to an
-exact base fingerprint, checked under a trusted frozen policy, and committed only by the same runtime
-instance that issued the accepted result. The pure `verifyTransition` function is an evaluator, not a
-write authority.
+Model/plugin code may propose operations but must not hold the canonical kernel or the `TransitionVerifier` commit capability. A transition is staged on an isolated kernel, bound to an exact base fingerprint, checked under a trusted frozen policy, and committed only by the same runtime instance that issued the accepted result. The pure `verifyTransition` function is an evaluator, not a write authority.
 
-External semantic/security checks must be constructed or authorized by the trusted host. Actor names,
-authority labels, SHA-256 digests, and report metadata are not signatures. Until authenticated actors
-and attestation exist, arbitrary check objects supplied by the proposing model are untrusted input.
+External semantic/security checks must be constructed or authorized by the trusted host. Actor names, authority labels, SHA-256 digests, and report metadata are not signatures. Until authenticated actors and attestation exist, arbitrary check objects supplied by the proposing model are untrusted input.
 
-Transition policies cap operation count, scope fan-out, evidence fan-in, checks, state assertions, and
-canonical proposal size. Hosts must additionally cap raw request bytes and parser depth before calling
-the library.
+Transition policies cap operation count, scope fan-out, evidence fan-in, checks, state assertions, and canonical proposal size. Hosts must additionally cap raw request bytes and parser depth before calling the library.
 
 ### Durable canonical publication
 
@@ -83,26 +75,13 @@ The durable boundary rejects embedded NULs, ill-formed Unicode, non-canonical SQ
 
 ### Durable projection consumption
 
-A new projection consumer must register a configuration digest, explicit initial canonical cursor, and
-an exclusive non-overlapping lowercase SQL-object prefix. Genesis is the safe default; starting at the
-current tail is an explicit history-skipping decision. Canonical batches are bounded and contiguous;
-`retry()` preserves the exact outstanding capability and range even when the durable tail advances.
+A new projection consumer must register a configuration digest, explicit initial canonical cursor, and an exclusive non-overlapping lowercase SQL-object prefix. Genesis is the safe default; starting at the current tail is an explicit history-skipping decision. Canonical batches are bounded and contiguous; `retry()` preserves the exact outstanding capability and range even when the durable tail advances.
 
-Projection mutation, durable receipt, and consumer cursor are published under one `BEGIN IMMEDIATE`
-transaction. The callback is trusted host code, must remain synchronous, and receives a revocable
-transaction-scoped capability. It may address only its registered namespace; raw connection access,
-other consumer namespaces, joins/subqueries, transaction control, PRAGMAs, catalogs, quoted SQL text,
-and `cl_consumer_*` state are forbidden. Parameters are runtime-typed and size-bounded. Consumer
-metadata is stored in STRICT tables and checked at the raw SQLite byte boundary. These controls do not
-sandbox projection code or provide distributed exactly-once delivery.
+Projection mutation, durable receipt, and consumer cursor are published under one `BEGIN IMMEDIATE` transaction. The callback is trusted host code, must remain synchronous, and receives a revocable transaction-scoped capability. It may address only its registered namespace; raw connection access, other consumer namespaces, joins/subqueries, transaction control, PRAGMAs, catalogs, quoted SQL text, and `cl_consumer_*` state are forbidden. Parameters are runtime-typed and size-bounded. Consumer metadata is stored in STRICT tables and checked at the raw SQLite byte boundary. These controls do not sandbox projection code or provide distributed exactly-once delivery.
 
-The FTS5 feed consumer additionally requires its consumer cursor to equal the durable canonical tail
-before current search. Restricted/deleted evidence and dependent claim text are removed transactionally;
-restoration that needs discarded plaintext requires a canonical rebuild. The projection database still
-contains structural identifiers and provenance metadata and must therefore be protected as sensitive
-metadata even when search text has been scrubbed. Selected result buckets are recomputed before
-candidate emission, but unkeyed manifests do not authenticate an operator capable of coherently
-rewriting the entire projection database.
+The FTS5 feed consumer additionally requires its consumer cursor to equal the durable canonical tail before current search. Restricted/deleted evidence and dependent claim text are removed transactionally; restoration that needs discarded plaintext requires a canonical rebuild. The projection database still contains structural identifiers and provenance metadata and must therefore be protected as sensitive metadata even when search text has been scrubbed. Selected result buckets are recomputed before candidate emission, but unkeyed manifests do not authenticate an operator capable of coherently rewriting the entire projection database.
+
+The canonical object-read consumer also requires genesis completeness and current-tail equality. It stores canonical evidence and claim metadata, immutable transaction-time versions, evidence references, and bounded previews for evidence whose canonical record permits them. Current restriction or deletion suppresses preview content even in historical reads. Exact lookups verify state, version, head, deterministic bucket, sparse path, roots, checkpoint, and configuration. Compound address reads and claim provenance closure must remain on one cursor/revision/batch/configuration or fail closed. These controls detect partial or incoherent corruption; the sparse roots are stored inside the derived projection and therefore are not an independent trust anchor against a database operator that coherently replaces the entire projection. Such deployments require protected storage and a future separately authenticated commitment.
 
 ### Reversible learning
 

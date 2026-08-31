@@ -38,7 +38,8 @@ Exit gate: all Level 1 evidence requirements in [EVALUATION.md](EVALUATION.md).
 - [x] bounded canonical change-feed consumption with verified restart checkpoints and stable range identities;
 - [x] atomic registered projection-consumer transaction with configuration binding, exclusive SQL namespaces, revocable capabilities, receipts, and durable cursors;
 - [x] FTS5 canonical change-feed consumer with incremental reverse-dependency updates, current-tail gating, privacy scrubbing, bucket integrity checks, and rebuild-required fallback;
-- canonical object-read index for selected evidence/claim rehydration without lifetime-history scans;
+- [x] canonical object-read index for selected evidence/claim rehydration with provenance, bitemporal versions, sparse integrity proofs, privacy overlays, and no lifetime-history scan on the selected-read path;
+- [ ] externally authenticated projection-root commitment independent of the derived projection database;
 - O(k) authenticated startup checkpoint/recovery without genesis replay;
 - export, inspect, supersede, suppress, and forget APIs;
 - [x] deterministic semantic replay, real-process crash recovery, and persisted corruption fixtures.
@@ -78,16 +79,17 @@ Exit gate: strong current-state, historical-state, premise-resistance, and conta
 
 ## Phase 4 — Experience and procedural learning
 
-- trajectory/outcome capture adapters;
-- verifier registry;
-- causal usage traces;
-- candidate procedure induction;
-- required/forbidden applicability conditions;
-- counterexample search;
-- independent evidence grouping;
-- contextual success/failure models;
-- procedure mixtures and conflict router;
-- staged promotion, canary use, deprecation, and rollback.
+- [ ] `experience-attribution-v1`: typed activation/materialization/consultation/application traces;
+- [ ] separate correlational trajectory evidence from paired causal intervention evidence;
+- [ ] verifier-bound treatment/control identity and experimental-unit checks;
+- [ ] conservative positive/negative/mixed/neutral/insufficient utility assessment;
+- [ ] contextual applicability hypotheses with required and forbidden features;
+- [ ] discovery/held-out validation separation;
+- [ ] candidate procedure induction with step-level canonical evidence;
+- [ ] counterexample search and independent evidence grouping;
+- [ ] contextual success/failure models;
+- [ ] procedure mixtures and conflict router;
+- [ ] staged promotion, canary use, deprecation, and rollback.
 
 Exit gate: lower same-error recurrence and positive transfer on held-out tasks without increased negative transfer.
 
