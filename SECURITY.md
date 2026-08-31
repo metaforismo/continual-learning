@@ -168,8 +168,9 @@ procedurePromotionAuthorized = false
 executionAuthorized = false
 ```
 
-Canonical assignment receipts, complete trial registries, monotonic resource accounting, verified
-outcomes, stop execution, and rollback receipts are not implemented by this boundary.
+This planning boundary does not issue admission, run, monitoring, rollback, or outcome receipts.
+Those externally performed actions are admitted only by the separate guarded receipt boundary below;
+complete cross-process trial accounting and authenticated monotonic metering remain future work.
 
 ### Reversible learning
 
@@ -198,4 +199,4 @@ Until a private reporting channel is published, avoid posting exploitable detail
 
 ## Canonical canary receipt boundary
 
-Receipt APIs require exact process-issued plans/reviews and canonical evidence from the planned scheduler, runner, observer, verifier, or rollback-controller source family. Process-local registries enforce run IDs, subject attempts, concurrency, cumulative cost, monotonic monitoring, complete stop-evaluation prefixes, and atomic retries. Receipts may report that an external host acted or issued a grant; they do not create credentials, schedule work, invoke tools, roll back state, promote a procedure, or set any authority flag to true.
+Receipt APIs require exact process-issued plans/reviews and canonical evidence from the planned scheduler, harness-bound runner, observer, verifier, or rollback-controller source family. The binding that carries the exact external receipt or runner digest must itself belong to that source family; unrelated decoy evidence cannot supply identity continuity. An external action digest must also differ from the component identity digest it claims acted, so identity evidence cannot masquerade as an action receipt. A `human` outcome label additionally requires the exact external verification digest to carry `human-explicit` authority. Top-level receipt requests and nested runner identities reject undeclared runtime fields. Process-local registries enforce run IDs, contiguous non-overlapping subject attempts, no retry after success, concurrency, monotonic monitoring, representable complete stop-evaluation prefixes, and atomic retries; they track cumulative cost and tool calls and expose budget breaches without hiding the external action. Observation admission stops before the evaluator's count or canonical-ID bounds are exhausted. Exact retry remains bound to the original canonical snapshot rather than a later tail. Receipts may report that an external host acted or issued a grant; they do not create credentials, schedule work, invoke tools, roll back state, promote a procedure, or set any authority flag to true.

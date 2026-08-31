@@ -142,21 +142,25 @@ When an old state is invalidated but no replacement is known, the current value 
 
 For each activated but unmaterialized memory, record why it was not selected. For each selected memory, record whether the model cited, expanded, or used it. Without negative selection data, the retrieval controller cannot learn intelligently.
 
-## Open problems
 
-The architecture reduces risk but does not solve several research questions:
+## Canary receipt failures
 
-- reliable implicit invalidation across arbitrary commonsense dependencies;
-- causal credit assignment for interacting memories and tools;
-- stable learned associations at billion-object scale;
-- skill composition without combinatorial conflicts;
-- privacy deletion after parametric consolidation;
-- controller learning under adversarial and non-stationary feedback;
-- proving that bounded-context performance does not decay with lifetime history;
-- evaluating continual learnability over realistic month- or year-scale streams;
-- independently authenticating derived projection commitments without making them canonical truth.
-
-These remain explicit research targets, not implementation details to hand-wave away.
+| Failure | Required response |
+|---|---|
+| Foreign external digest is paired with decoy evidence from the planned source family | Require the exact digest-bearing binding itself to overlap the planned component lineage |
+| Planned component identity digest is reused as the external action receipt | Require admission, grant, completion, observation, rollback, and verification action digests to differ from the relevant component identity digest |
+| Internal-core receipt or structural clone is presented as a guarded capability | Public predicates and downstream APIs require the process-local guarded capability object |
+| One subject skips an attempt, overlaps two attempts, or retries after success | Require the immediately preceding failed/aborted/timed-out/rolled-back attempt to be completed and keep one active run per subject |
+| Per-run tool-call reports reset a plan-wide budget | Retain both run and cumulative tool-call counts; evaluate the plan limit cumulatively |
+| Observer receipt stores the aggregate runtime identity instead of the observer identity | Bind and expose the exact planned observer digest |
+| Caller omits an already admitted monitoring sample | Evaluate only the complete admitted prefix for the metric at `evaluatedAt` |
+| Monitoring admission grows beyond what complete-prefix evaluation can encode | Bound per-metric observation count and canonical ID size before mutating the admitted prefix |
+| Outcome event belongs to another procedure/population or uses model-only verification | Bind run, scope, procedure, population manifest, time, external verifier class, and exact event evidence |
+| Tool evidence is relabeled as a human verification | Require the exact external verification digest to carry `human-explicit` authority before preserving a `human` verifier class |
+| Authority-like runtime fields are silently ignored | Reject undeclared top-level receipt fields and nested runner fields |
+| Conflicting logical identities partially reserve another registry key | Preflight every identity and capacity check before mutating guarded registries |
+| A retry is presented against a later canonical tail as if it were the original receipt | Bind v1 exact retry to the original canonical snapshot; defer tail-independent idempotency to the durable registry gate |
+| Trusted host omits an action before receipt admission | Preserve this as an explicit v1 limitation; require complete durable experiment accounting in the next gate |
 
 ## Durable delivery failures
 
@@ -184,3 +188,19 @@ These remain explicit research targets, not implementation details to hand-wave 
 | Claim and evidence closure cross revisions during concurrent catch-up | Require one cursor/revision/batch/configuration across the complete result; fail closed and retry |
 | Historical lookup precedes the first stored version | Do not convert the missing covering interval into proof of historical absence |
 | Projection roots are coherently rewritten with every derived row | Treat internal roots as corruption detectors, not external trust anchors; require protected storage or a future host-authenticated commitment |
+
+## Open problems
+
+The architecture reduces risk but does not solve several research questions:
+
+- reliable implicit invalidation across arbitrary commonsense dependencies;
+- causal credit assignment for interacting memories and tools;
+- stable learned associations at billion-object scale;
+- skill composition without combinatorial conflicts;
+- privacy deletion after parametric consolidation;
+- controller learning under adversarial and non-stationary feedback;
+- proving that bounded-context performance does not decay with lifetime history;
+- evaluating continual learnability over realistic month- or year-scale streams;
+- independently authenticating derived projection commitments without making them canonical truth.
+
+These remain explicit research targets, not implementation details to hand-wave away.

@@ -19,13 +19,13 @@ import {
   type CanaryStopAction,
   type CanaryPlanReview,
   type BoundedCanaryPlan,
-  type VerifiedCanaryRuntimeIdentity,
 } from './bounded-canary-plans-api.js';
 import type { ProcedureEvidenceBinding } from './verified-procedure-candidates-api.js';
 
 export const CANONICAL_CANARY_RECEIPT_SCHEMA_VERSION = 1 as const;
 
 export type CanaryArm = Extract<CanaryAssignment, 'treatment' | 'control'>;
+export type CanaryOutcomeVerifierClass = 'tool' | 'test' | 'human';
 
 const SHA256_PATTERN = /^sha256:[0-9a-f]{64}$/;
 const MAX_INPUT_CHARACTERS = 1_000_000;
@@ -42,7 +42,15 @@ const TERMINAL_STATUSES = new Set([
 ]);
 const ROLLBACK_OUTCOMES = new Set(['succeeded', 'partial', 'failed']);
 const COMPARATORS = new Set(['gt', 'gte', 'lt', 'lte', 'eq']);
+const EXTERNAL_OUTCOME_VERIFIERS: ReadonlySet<CanaryOutcomeVerifierClass> = new Set([
+  'tool',
+  'test',
+  'human',
+]);
 
+function isExternalOutcomeVerifier(value: string): value is CanaryOutcomeVerifierClass {
+  return EXTERNAL_OUTCOME_VERIFIERS.has(value as CanaryOutcomeVerifierClass);
+}
 
 const issuedAdmissions = new WeakSet<object>();
 const issuedStarts = new WeakSet<object>();
@@ -181,6 +189,7 @@ export interface VerifiedCanaryRunCompletionReceipt {
   readonly costMicrounits: number;
   readonly cumulativeCostMicrounits: number;
   readonly toolCalls: number;
+  readonly cumulativeToolCalls: number;
   readonly durationMs: number;
   readonly limitBreaches: readonly string[];
   readonly externalRunReceiptDigest: string;
@@ -342,6 +351,7 @@ export interface VerifiedCanaryOutcomeReceipt {
   readonly arm: CanaryArm;
   readonly outcomeEventId: string;
   readonly outcome: 'success' | 'partial' | 'failure' | 'unknown';
+  readonly verifier: CanaryOutcomeVerifierClass;
   readonly verifierDigest: string;
   readonly externalVerificationDigest: string;
   readonly evidence: readonly ProcedureEvidenceBinding[];
@@ -432,6 +442,24 @@ function assertSafeInteger(
 function assertFiniteNumber(value: unknown, label: string): asserts value is number {
   if (typeof value !== 'number' || !Number.isFinite(value) || Object.is(value, -0)) {
     throw new Error(`${label} must be a finite canonical number`);
+  }
+}
+
+function assertExactKeys(
+  value: unknown,
+  expectedKeys: readonly string[],
+  label: string,
+): asserts value is Record<string, unknown> {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) {
+    throw new Error(`${label} must be an object with exactly the declared fields`);
+  }
+  const actual = Object.keys(value).sort();
+  const expected = [...expectedKeys].sort();
+  if (
+    actual.length !== expected.length ||
+    actual.some((key, index) => key !== expected[index])
+  ) {
+    throw new Error(`${label} must contain exactly the declared fields`);
   }
 }
 
@@ -620,7 +648,7 @@ function normalizeRunner(
   input: CanaryRunnerIdentityInput,
   context: EvidenceContext,
 ): VerifiedCanaryRunnerIdentity {
-  if (typeof input !== 'object' || input === null) throw new Error('canary runner identity must be an object');
+  assertExactKeys(input, ['id', 'digest', 'evidence'], 'canary runner identity');
   assertText(input.id, 'canary runner id');
   assertDigest(input.digest, 'canary runner digest');
   const evidence = normalizeEvidence(
@@ -642,21 +670,49 @@ function sourceGroups(bindings: readonly ProcedureEvidenceBinding[]): readonly s
   return Object.freeze([...new Set(bindings.flatMap((binding) => binding.sourceGroups))].sort());
 }
 
-function requireRuntimeComponentSourceContinuity(
+function requireDigestBoundSourceContinuity(
   bindings: readonly ProcedureEvidenceBinding[],
-  identity: VerifiedCanaryRuntimeIdentity,
-  componentDigest: string,
+  identity: { readonly evidence: readonly ProcedureEvidenceBinding[] },
+  identityDigest: string,
+  receiptDigest: string,
+  label: string,
+  minimumDigestAuthority: Authority = 'external-source',
+): void {
+  const identityBindings = identity.evidence.filter(
+    (binding) => binding.contentHash === identityDigest,
+  );
+  if (identityBindings.length === 0) {
+    throw new Error(`${label} has no planned identity evidence`);
+  }
+  const expected = new Set(identityBindings.flatMap((binding) => binding.sourceGroups));
+  const exactDigestBindings = bindings.filter((binding) => binding.contentHash === receiptDigest);
+  const digestBindings = exactDigestBindings.filter(
+    (binding) =>
+      AUTHORITY_RANK[binding.authority] >= AUTHORITY_RANK[minimumDigestAuthority],
+  );
+  if (exactDigestBindings.length > 0 && digestBindings.length === 0) {
+    throw new Error(
+      `${label} exact receipt digest lacks ${minimumDigestAuthority} authority`,
+    );
+  }
+  if (
+    !digestBindings.some((binding) =>
+      binding.sourceGroups.some((group) => expected.has(group)),
+    )
+  ) {
+    throw new Error(
+      `${label} exact receipt digest is not linked to the planned identity source family`,
+    );
+  }
+}
+
+function assertExternalReceiptDigest(
+  receiptDigest: string,
+  identityDigest: string,
   label: string,
 ): void {
-  const componentBindings = identity.evidence.filter(
-    (binding) => binding.contentHash === componentDigest,
-  );
-  if (componentBindings.length === 0) {
-    throw new Error(`${label} has no planned component evidence`);
-  }
-  const expected = new Set(componentBindings.flatMap((binding) => binding.sourceGroups));
-  if (!bindings.some((binding) => binding.sourceGroups.some((group) => expected.has(group)))) {
-    throw new Error(`${label} is not linked to the planned component source family`);
+  if (receiptDigest === identityDigest) {
+    throw new Error(`${label} must differ from the planned identity digest`);
   }
 }
 
@@ -688,10 +744,29 @@ export function createCanaryAdmissionReceipt(
 ): VerifiedCanaryAdmissionReceipt {
   assertReadyPlan(plan, review);
   const request = canonicalSnapshot(input, 'canary admission receipt input');
+  assertExactKeys(
+    request,
+    [
+      'id',
+      'subjectDigest',
+      'assignmentDigest',
+      'hostAdmissionDigest',
+      'evidence',
+      'canonicalFingerprint',
+      'actor',
+      'admittedAt',
+    ],
+    'canary admission receipt input',
+  );
   assertText(request.id, 'canary admission receipt id');
   assertDigest(request.subjectDigest, 'canary admission subjectDigest');
   assertDigest(request.assignmentDigest, 'canary admission assignmentDigest');
   assertDigest(request.hostAdmissionDigest, 'canary hostAdmissionDigest');
+  assertExternalReceiptDigest(
+    request.hostAdmissionDigest,
+    plan.runtime.schedulerDigest,
+    'canary host admission digest',
+  );
   assertText(request.actor, 'canary admission actor');
   assertSafeInteger(request.admittedAt, 'canary admittedAt', review.recordedAt);
   const assignment = plan.population.subjects.find(
@@ -716,10 +791,11 @@ export function createCanaryAdmissionReceipt(
     request.hostAdmissionDigest,
     'tool-verified',
   );
-  requireRuntimeComponentSourceContinuity(
+  requireDigestBoundSourceContinuity(
     evidence,
     plan.runtime,
     plan.runtime.schedulerDigest,
+    request.hostAdmissionDigest,
     'canary host admission evidence',
   );
   const unsigned = {
@@ -774,6 +850,22 @@ export function recordCanaryRunStartReceipt(
     throw new Error('canary admission receipt belongs to another plan or review');
   }
   const request = canonicalSnapshot(input, 'canary run start receipt input');
+  assertExactKeys(
+    request,
+    [
+      'id',
+      'runId',
+      'attempt',
+      'runner',
+      'environmentDigest',
+      'executionGrantDigest',
+      'grantEvidence',
+      'canonicalFingerprint',
+      'actor',
+      'startedAt',
+    ],
+    'canary run start receipt input',
+  );
   assertText(request.id, 'canary run start receipt id');
   assertText(request.runId, 'canary run id');
   assertSafeInteger(request.attempt, 'canary run attempt', 1, (plan.budget.maxRetriesPerSubject + 1));
@@ -782,11 +874,23 @@ export function recordCanaryRunStartReceipt(
     throw new Error('canary run start does not use the planned environment digest');
   }
   assertDigest(request.executionGrantDigest, 'canary executionGrantDigest');
+  assertExternalReceiptDigest(
+    request.executionGrantDigest,
+    plan.runtime.schedulerDigest,
+    'canary execution grant digest',
+  );
   assertText(request.actor, 'canary run start actor');
   assertSafeInteger(request.startedAt, 'canary startedAt', admission.admittedAt);
   const events = canonicalEvents(eventsInput, request.canonicalFingerprint, plan, review);
   const context = evidenceContext(events, request.startedAt, plan.scope);
   const runner = normalizeRunner(request.runner, context);
+  requireDigestBoundSourceContinuity(
+    runner.evidence,
+    plan.runtime,
+    plan.runtime.harnessDigest,
+    runner.digest,
+    'canary runner identity evidence',
+  );
   const grantEvidence = normalizeEvidence(
     request.grantEvidence,
     context,
@@ -795,10 +899,11 @@ export function recordCanaryRunStartReceipt(
     request.executionGrantDigest,
     'tool-verified',
   );
-  requireRuntimeComponentSourceContinuity(
+  requireDigestBoundSourceContinuity(
     grantEvidence,
     plan.runtime,
     plan.runtime.schedulerDigest,
+    request.executionGrantDigest,
     'canary execution grant evidence',
   );
   const unsigned = {
@@ -845,6 +950,7 @@ export function recordCanaryRunCompletionReceipt(
   start: VerifiedCanaryRunStartReceipt,
   input: CanaryRunCompletionReceiptInput,
   priorCumulativeCostMicrounits = 0,
+  priorCumulativeToolCalls = 0,
 ): VerifiedCanaryRunCompletionReceipt {
   assertReadyPlan(plan, review);
   if (!isIssuedCanaryRunStartReceipt(start)) {
@@ -854,6 +960,22 @@ export function recordCanaryRunCompletionReceipt(
     throw new Error('canary run start belongs to another plan or review');
   }
   const request = canonicalSnapshot(input, 'canary run completion receipt input');
+  assertExactKeys(
+    request,
+    [
+      'id',
+      'runId',
+      'terminalStatus',
+      'costMicrounits',
+      'toolCalls',
+      'externalRunReceiptDigest',
+      'evidence',
+      'canonicalFingerprint',
+      'actor',
+      'completedAt',
+    ],
+    'canary run completion receipt input',
+  );
   assertText(request.id, 'canary completion receipt id');
   assertText(request.runId, 'canary completion runId');
   if (request.runId !== start.runId) throw new Error('canary completion runId differs from its start receipt');
@@ -861,7 +983,13 @@ export function recordCanaryRunCompletionReceipt(
   assertSafeInteger(request.costMicrounits, 'canary completion costMicrounits');
   assertSafeInteger(request.toolCalls, 'canary completion toolCalls');
   assertSafeInteger(priorCumulativeCostMicrounits, 'prior cumulative canary cost');
+  assertSafeInteger(priorCumulativeToolCalls, 'prior cumulative canary tool calls');
   assertDigest(request.externalRunReceiptDigest, 'canary externalRunReceiptDigest');
+  assertExternalReceiptDigest(
+    request.externalRunReceiptDigest,
+    start.runner.digest,
+    'canary external run receipt digest',
+  );
   assertText(request.actor, 'canary completion actor');
   assertSafeInteger(request.completedAt, 'canary completedAt', start.startedAt);
   const events = canonicalEvents(eventsInput, request.canonicalFingerprint, plan, review);
@@ -874,18 +1002,25 @@ export function recordCanaryRunCompletionReceipt(
     request.externalRunReceiptDigest,
     'tool-verified',
   );
-  const runnerGroups = new Set(start.runner.evidence.flatMap((binding) => binding.sourceGroups));
-  if (!evidence.some((binding) => binding.sourceGroups.some((group) => runnerGroups.has(group)))) {
-    throw new Error('canary completion evidence is not linked to the admitted runner source family');
-  }
+  requireDigestBoundSourceContinuity(
+    evidence,
+    start.runner,
+    start.runner.digest,
+    request.externalRunReceiptDigest,
+    'canary completion evidence',
+  );
   const durationMs = request.completedAt - start.startedAt;
   const cumulativeCostMicrounits = priorCumulativeCostMicrounits + request.costMicrounits;
+  const cumulativeToolCalls = priorCumulativeToolCalls + request.toolCalls;
   if (!Number.isSafeInteger(cumulativeCostMicrounits)) {
     throw new Error('cumulative canary cost exceeds the safe integer range');
   }
+  if (!Number.isSafeInteger(cumulativeToolCalls)) {
+    throw new Error('cumulative canary tool calls exceed the safe integer range');
+  }
   const limitBreaches: string[] = [];
   if (durationMs > plan.budget.maxDurationMs) limitBreaches.push('duration');
-  if (request.toolCalls > plan.budget.maxToolCalls) limitBreaches.push('tool-calls');
+  if (cumulativeToolCalls > plan.budget.maxToolCalls) limitBreaches.push('tool-calls');
   if (cumulativeCostMicrounits > plan.budget.maxCostMicros) limitBreaches.push('plan-cost');
   const unsigned = {
     schemaVersion: CANONICAL_CANARY_RECEIPT_SCHEMA_VERSION,
@@ -904,6 +1039,7 @@ export function recordCanaryRunCompletionReceipt(
     costMicrounits: request.costMicrounits,
     cumulativeCostMicrounits,
     toolCalls: request.toolCalls,
+    cumulativeToolCalls,
     durationMs,
     limitBreaches: Object.freeze(limitBreaches),
     externalRunReceiptDigest: request.externalRunReceiptDigest,
@@ -936,6 +1072,23 @@ export function recordCanaryMonitoringObservation(
 ): VerifiedCanaryMonitoringObservation {
   assertReadyPlan(plan, review);
   const request = canonicalSnapshot(input, 'canary monitoring observation input');
+  assertExactKeys(
+    request,
+    [
+      'id',
+      'metric',
+      'sequence',
+      'value',
+      'sampleCount',
+      'observerDigest',
+      'externalObservationDigest',
+      'evidence',
+      'canonicalFingerprint',
+      'actor',
+      'observedAt',
+    ],
+    'canary monitoring observation input',
+  );
   assertText(request.id, 'canary observation id');
   assertText(request.metric, 'canary observation metric');
   if (!plan.stopConditions.some((condition) => condition.metric === request.metric)) {
@@ -949,6 +1102,11 @@ export function recordCanaryMonitoringObservation(
     throw new Error('canary observation does not use the planned observer digest');
   }
   assertDigest(request.externalObservationDigest, 'canary externalObservationDigest');
+  assertExternalReceiptDigest(
+    request.externalObservationDigest,
+    plan.runtime.observerDigest,
+    'canary external observation digest',
+  );
   assertText(request.actor, 'canary observation actor');
   assertSafeInteger(request.observedAt, 'canary observation observedAt', review.recordedAt);
   const events = canonicalEvents(eventsInput, request.canonicalFingerprint, plan, review);
@@ -961,10 +1119,11 @@ export function recordCanaryMonitoringObservation(
     request.externalObservationDigest,
     'tool-verified',
   );
-  requireRuntimeComponentSourceContinuity(
+  requireDigestBoundSourceContinuity(
     evidence,
     plan.runtime,
     plan.runtime.observerDigest,
+    request.externalObservationDigest,
     'canary monitoring observation evidence',
   );
   const unsigned = {
@@ -978,7 +1137,7 @@ export function recordCanaryMonitoringObservation(
     sequence: request.sequence,
     value: request.value,
     sampleCount: request.sampleCount,
-    observerIdentityDigest: plan.runtime.identityDigest,
+    observerIdentityDigest: plan.runtime.observerDigest,
     externalObservationDigest: request.externalObservationDigest,
     evidence,
     canonicalFingerprint: request.canonicalFingerprint,
@@ -1009,6 +1168,11 @@ export function evaluateCanaryStopCondition(
 ): VerifiedCanaryStopEvaluation {
   assertReadyPlan(plan, review);
   const request = canonicalSnapshot(input, 'canary stop evaluation input');
+  assertExactKeys(
+    request,
+    ['id', 'conditionId', 'observationIds', 'canonicalFingerprint', 'actor', 'evaluatedAt'],
+    'canary stop evaluation input',
+  );
   assertText(request.id, 'canary stop evaluation id');
   assertText(request.conditionId, 'canary stop condition id');
   assertText(request.actor, 'canary stop evaluation actor');
@@ -1132,6 +1296,22 @@ export function recordCanaryRollbackReceipt(
     throw new Error('canary rollback receipt requires a triggered stop-and-rollback evaluation');
   }
   const request = canonicalSnapshot(input, 'canary rollback receipt input');
+  assertExactKeys(
+    request,
+    [
+      'id',
+      'evaluationId',
+      'controllerDigest',
+      'externalRollbackDigest',
+      'outcome',
+      'evidence',
+      'canonicalFingerprint',
+      'actor',
+      'startedAt',
+      'completedAt',
+    ],
+    'canary rollback receipt input',
+  );
   assertText(request.id, 'canary rollback receipt id');
   assertText(request.evaluationId, 'canary rollback evaluationId');
   if (request.evaluationId !== evaluation.id) throw new Error('canary rollback targets another evaluation');
@@ -1140,6 +1320,11 @@ export function recordCanaryRollbackReceipt(
     throw new Error('canary rollback does not use the planned rollback controller digest');
   }
   assertDigest(request.externalRollbackDigest, 'canary externalRollbackDigest');
+  assertExternalReceiptDigest(
+    request.externalRollbackDigest,
+    plan.runtime.rollbackControllerDigest,
+    'canary external rollback digest',
+  );
   if (!ROLLBACK_OUTCOMES.has(request.outcome)) throw new Error('canary rollback outcome is invalid');
   assertText(request.actor, 'canary rollback actor');
   assertSafeInteger(request.startedAt, 'canary rollback startedAt', evaluation.evaluatedAt);
@@ -1158,10 +1343,11 @@ export function recordCanaryRollbackReceipt(
     request.externalRollbackDigest,
     'tool-verified',
   );
-  requireRuntimeComponentSourceContinuity(
+  requireDigestBoundSourceContinuity(
     evidence,
     plan.runtime,
     plan.runtime.rollbackControllerDigest,
+    request.externalRollbackDigest,
     'canary rollback evidence',
   );
   const unsigned = {
@@ -1215,6 +1401,21 @@ export function verifyCanaryOutcomeReceipt(
     throw new Error('canary completion receipt belongs to another plan or review');
   }
   const request = canonicalSnapshot(input, 'canary outcome verification input');
+  assertExactKeys(
+    request,
+    [
+      'id',
+      'completionId',
+      'outcomeEventId',
+      'verifierDigest',
+      'externalVerificationDigest',
+      'evidence',
+      'canonicalFingerprint',
+      'actor',
+      'verifiedAt',
+    ],
+    'canary outcome verification input',
+  );
   assertText(request.id, 'canary outcome receipt id');
   assertText(request.completionId, 'canary outcome completionId');
   if (request.completionId !== completion.id) throw new Error('canary outcome targets another completion');
@@ -1224,6 +1425,11 @@ export function verifyCanaryOutcomeReceipt(
     throw new Error('canary outcome does not use the planned verifier digest');
   }
   assertDigest(request.externalVerificationDigest, 'canary externalVerificationDigest');
+  assertExternalReceiptDigest(
+    request.externalVerificationDigest,
+    plan.runtime.verifierDigest,
+    'canary external verification digest',
+  );
   assertText(request.actor, 'canary outcome actor');
   assertSafeInteger(request.verifiedAt, 'canary outcome verifiedAt', completion.completedAt);
   const events = canonicalEvents(eventsInput, request.canonicalFingerprint, plan, review);
@@ -1238,11 +1444,19 @@ export function verifyCanaryOutcomeReceipt(
   if (
     event.data.scope !== plan.scope ||
     event.data.subjectId !== completion.runId ||
+    event.data.taskId !== plan.procedureId ||
+    event.data.contextFingerprint !== plan.population.manifestDigest ||
     event.recordedAt < completion.completedAt ||
     event.recordedAt > request.verifiedAt
   ) {
-    throw new Error('canary outcome event does not bind the completed run, scope, or verification time');
+    throw new Error(
+      'canary outcome event does not bind the completed run, scope, procedure, population context, or verification time',
+    );
   }
+  if (!isExternalOutcomeVerifier(event.data.verifier)) {
+    throw new Error('canary outcome event requires an external verifier classification');
+  }
+  const verifier = event.data.verifier;
   const context = evidenceContext(events, request.verifiedAt, plan.scope);
   const evidence = normalizeEvidence(
     request.evidence,
@@ -1252,11 +1466,13 @@ export function verifyCanaryOutcomeReceipt(
     request.externalVerificationDigest,
     'tool-verified',
   );
-  requireRuntimeComponentSourceContinuity(
+  requireDigestBoundSourceContinuity(
     evidence,
     plan.runtime,
     plan.runtime.verifierDigest,
+    request.externalVerificationDigest,
     'canary outcome verification evidence',
+    verifier === 'human' ? 'human-explicit' : 'tool-verified',
   );
   for (const binding of evidence) {
     const exactReference = event.data.evidence.some((reference) => {
@@ -1301,6 +1517,7 @@ export function verifyCanaryOutcomeReceipt(
     arm: completion.arm,
     outcomeEventId: event.id,
     outcome: event.data.outcome,
+    verifier,
     verifierDigest: plan.runtime.verifierDigest,
     externalVerificationDigest: request.externalVerificationDigest,
     evidence,

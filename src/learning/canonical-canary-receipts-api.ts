@@ -39,18 +39,12 @@ import {
 
 export {
   CANONICAL_CANARY_RECEIPT_SCHEMA_VERSION,
-  isIssuedCanaryAdmissionReceipt,
-  isIssuedCanaryMonitoringObservation,
-  isIssuedCanaryOutcomeReceipt,
-  isIssuedCanaryRollbackReceipt,
-  isIssuedCanaryRunCompletionReceipt,
-  isIssuedCanaryRunStartReceipt,
-  isIssuedCanaryStopEvaluation,
 } from './canonical-canary-receipts.js';
 
 export type {
   CanaryAdmissionReceiptInput,
   CanaryMonitoringObservationInput,
+  CanaryOutcomeVerifierClass,
   CanaryOutcomeVerificationInput,
   CanaryRollbackOutcome,
   CanaryRollbackReceiptInput,
@@ -72,6 +66,8 @@ export type {
 const MAX_EVENTS = 10_000_000;
 const MAX_INPUT_CHARACTERS = 1_000_000;
 const MAX_IDENTITIES = 65_536;
+const MAX_OBSERVATIONS_PER_METRIC = 4_096;
+const MAX_OBSERVATION_ID_CANONICAL_CHARACTERS = 250_000;
 
 interface IssuedIdentity<T> {
   readonly digest: string;
@@ -82,9 +78,12 @@ interface PlanRunState {
   readonly startsByRunId: Map<string, VerifiedCanaryRunStartReceipt>;
   readonly startsBySubjectAttempt: Map<string, VerifiedCanaryRunStartReceipt>;
   readonly activeRunIds: Set<string>;
+  readonly activeRunBySubjectDigest: Map<string, string>;
   readonly completionsByRunId: Map<string, VerifiedCanaryRunCompletionReceipt>;
   readonly costBeforeCompletionByRunId: Map<string, number>;
+  readonly toolCallsBeforeCompletionByRunId: Map<string, number>;
   cumulativeCostMicrounits: number;
+  cumulativeToolCalls: number;
 }
 
 interface MetricObservationState {
@@ -93,6 +92,7 @@ interface MetricObservationState {
   lastSequence: number;
   lastSampleCount: number;
   lastObservedAt: number;
+  observationIdCanonicalCharacters: number;
 }
 
 const admissionsById = new Map<string, IssuedIdentity<VerifiedCanaryAdmissionReceipt>>();
@@ -133,6 +133,8 @@ const publicStarts = new WeakSet<object>();
 const publicCompletions = new WeakSet<object>();
 const publicObservations = new WeakSet<object>();
 const publicEvaluations = new WeakSet<object>();
+const publicRollbacks = new WeakSet<object>();
+const publicOutcomes = new WeakSet<object>();
 
 function deepFreeze<T>(value: T): T {
   if (value !== null && typeof value === 'object' && !Object.isFrozen(value)) {
@@ -233,9 +235,12 @@ function planRunState(planDigest: string): PlanRunState {
     startsByRunId: new Map(),
     startsBySubjectAttempt: new Map(),
     activeRunIds: new Set(),
+    activeRunBySubjectDigest: new Map(),
     completionsByRunId: new Map(),
     costBeforeCompletionByRunId: new Map(),
+    toolCallsBeforeCompletionByRunId: new Map(),
     cumulativeCostMicrounits: 0,
+    cumulativeToolCalls: 0,
   };
   runStateByPlan.set(planDigest, created);
   return created;
@@ -254,6 +259,7 @@ function metricState(planDigest: string, metric: string): MetricObservationState
     lastSequence: 0,
     lastSampleCount: 0,
     lastObservedAt: 0,
+    observationIdCanonicalCharacters: 0,
   };
   observationsByPlanMetric.set(key, created);
   return created;
@@ -327,6 +333,26 @@ export function recordCanaryRunStartReceipt(
     publicStarts.add(selected as object);
     return selected;
   }
+  const activeRunId = state.activeRunBySubjectDigest.get(receipt.subjectDigest);
+  if (activeRunId !== undefined) {
+    throw new Error(
+      `canary subject already has an active run: ${receipt.subjectDigest} (${activeRunId})`,
+    );
+  }
+  if (receipt.attempt > 1) {
+    const precedingAttemptKey = `${receipt.subjectDigest}:attempt:${receipt.attempt - 1}`;
+    const precedingStart = state.startsBySubjectAttempt.get(precedingAttemptKey);
+    if (precedingStart === undefined) {
+      throw new Error('canary retry requires the immediately preceding subject attempt');
+    }
+    const precedingCompletion = state.completionsByRunId.get(precedingStart.runId);
+    if (precedingCompletion === undefined) {
+      throw new Error('canary retry requires a completed preceding subject attempt');
+    }
+    if (precedingCompletion.terminalStatus === 'success') {
+      throw new Error('canary retry cannot follow a successful subject attempt');
+    }
+  }
   if (state.startsByRunId.size >= plan.budget.maxRuns) {
     throw new Error('canary plan has reached its maximum run count');
   }
@@ -340,6 +366,7 @@ export function recordCanaryRunStartReceipt(
   state.startsByRunId.set(receipt.runId, receipt);
   state.startsBySubjectAttempt.set(subjectAttemptKey, receipt);
   state.activeRunIds.add(receipt.runId);
+  state.activeRunBySubjectDigest.set(receipt.subjectDigest, receipt.runId);
   publicStarts.add(receipt as object);
   return receipt;
 }
@@ -369,6 +396,8 @@ export function recordCanaryRunCompletionReceipt(
   const request = canonicalSnapshot(input, 'canary run completion receipt input');
   const costBefore =
     state.costBeforeCompletionByRunId.get(start.runId) ?? state.cumulativeCostMicrounits;
+  const toolCallsBefore =
+    state.toolCallsBeforeCompletionByRunId.get(start.runId) ?? state.cumulativeToolCalls;
   const receipt = recordCanaryRunCompletionReceiptCore(
     events,
     plan,
@@ -376,6 +405,7 @@ export function recordCanaryRunCompletionReceipt(
     start,
     request,
     costBefore,
+    toolCallsBefore,
   );
   if (!isIssuedCompletionCore(receipt)) {
     throw new Error('canary run completion core did not issue a capability');
@@ -407,6 +437,9 @@ export function recordCanaryRunCompletionReceipt(
   if (!state.activeRunIds.has(start.runId)) {
     throw new Error('canary completion cannot close a run that is not active');
   }
+  if (state.activeRunBySubjectDigest.get(start.subjectDigest) !== start.runId) {
+    throw new Error('canary completion does not match the subject active-run registry');
+  }
   assertCapacity(completionsById, true, 'canary completion id');
   assertCapacity(completionsByRunId, true, 'canary completed run');
   completionsById.set(receipt.id, Object.freeze({ digest: receipt.receiptDigest, value: receipt }));
@@ -415,9 +448,12 @@ export function recordCanaryRunCompletionReceipt(
     Object.freeze({ digest: receipt.receiptDigest, value: receipt }),
   );
   state.costBeforeCompletionByRunId.set(receipt.runId, costBefore);
+  state.toolCallsBeforeCompletionByRunId.set(receipt.runId, toolCallsBefore);
   state.cumulativeCostMicrounits = receipt.cumulativeCostMicrounits;
+  state.cumulativeToolCalls = receipt.cumulativeToolCalls;
   state.completionsByRunId.set(receipt.runId, receipt);
   state.activeRunIds.delete(receipt.runId);
+  state.activeRunBySubjectDigest.delete(receipt.subjectDigest);
   publicCompletions.add(receipt as object);
   return receipt;
 }
@@ -455,6 +491,16 @@ export function recordCanaryMonitoringObservation(
     publicObservations.add(selected as object);
     return selected;
   }
+  const encodedIdCharacters = canonicalJson(receipt.id).length + 1;
+  if (
+    state.bySequence.size >= MAX_OBSERVATIONS_PER_METRIC ||
+    state.observationIdCanonicalCharacters + encodedIdCharacters >
+      MAX_OBSERVATION_ID_CANONICAL_CHARACTERS
+  ) {
+    throw new RangeError(
+      'canary monitoring prefix exceeds the complete-evaluation representation bound',
+    );
+  }
   if (receipt.sequence !== state.lastSequence + 1) {
     throw new Error(`canary monitoring sequence must advance to ${state.lastSequence + 1}`);
   }
@@ -471,6 +517,7 @@ export function recordCanaryMonitoringObservation(
   state.lastSequence = receipt.sequence;
   state.lastSampleCount = receipt.sampleCount;
   state.lastObservedAt = receipt.observedAt;
+  state.observationIdCanonicalCharacters += encodedIdCharacters;
   publicObservations.add(receipt as object);
   return receipt;
 }
@@ -554,7 +601,7 @@ export function recordCanaryRollbackReceipt(
   const request = canonicalSnapshot(input, 'canary rollback receipt input');
   const receipt = recordCanaryRollbackReceiptCore(events, plan, review, evaluation, request);
   if (!isIssuedRollbackCore(receipt)) throw new Error('canary rollback core did not issue a capability');
-  return bindTwo(
+  const selected = bindTwo(
     receipt.id,
     receipt.evaluationDigest,
     receipt.receiptDigest,
@@ -564,6 +611,8 @@ export function recordCanaryRollbackReceipt(
     'canary rollback receipt id',
     'canary rolled-back evaluation',
   );
+  publicRollbacks.add(selected as object);
+  return selected;
 }
 
 /** Bind a completion to one canonical outcome event and the planned verifier family. */
@@ -587,7 +636,7 @@ export function verifyCanaryOutcomeReceipt(
   const request = canonicalSnapshot(input, 'canary outcome verification input');
   const receipt = verifyCanaryOutcomeReceiptCore(events, plan, review, completion, request);
   if (!isIssuedOutcomeCore(receipt)) throw new Error('canary outcome core did not issue a capability');
-  return bindTwo(
+  const selected = bindTwo(
     receipt.id,
     receipt.completionReceiptDigest,
     receipt.receiptDigest,
@@ -597,4 +646,48 @@ export function verifyCanaryOutcomeReceipt(
     'canary outcome receipt id',
     'canary verified completion',
   );
+  publicOutcomes.add(selected as object);
+  return selected;
+}
+
+export function isIssuedCanaryAdmissionReceipt(
+  value: VerifiedCanaryAdmissionReceipt,
+): boolean {
+  return typeof value === 'object' && value !== null && publicAdmissions.has(value as object);
+}
+
+export function isIssuedCanaryRunStartReceipt(
+  value: VerifiedCanaryRunStartReceipt,
+): boolean {
+  return typeof value === 'object' && value !== null && publicStarts.has(value as object);
+}
+
+export function isIssuedCanaryRunCompletionReceipt(
+  value: VerifiedCanaryRunCompletionReceipt,
+): boolean {
+  return typeof value === 'object' && value !== null && publicCompletions.has(value as object);
+}
+
+export function isIssuedCanaryMonitoringObservation(
+  value: VerifiedCanaryMonitoringObservation,
+): boolean {
+  return typeof value === 'object' && value !== null && publicObservations.has(value as object);
+}
+
+export function isIssuedCanaryStopEvaluation(
+  value: VerifiedCanaryStopEvaluation,
+): boolean {
+  return typeof value === 'object' && value !== null && publicEvaluations.has(value as object);
+}
+
+export function isIssuedCanaryRollbackReceipt(
+  value: VerifiedCanaryRollbackReceipt,
+): boolean {
+  return typeof value === 'object' && value !== null && publicRollbacks.has(value as object);
+}
+
+export function isIssuedCanaryOutcomeReceipt(
+  value: VerifiedCanaryOutcomeReceipt,
+): boolean {
+  return typeof value === 'object' && value !== null && publicOutcomes.has(value as object);
 }

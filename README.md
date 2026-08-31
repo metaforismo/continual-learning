@@ -156,7 +156,7 @@ Those claims must be earned independently through the evidence ladder.
 
 ## Status
 
-Foundational kernel, deterministic state adjudicator, capability-gated transition verifier, crash-safe canonical SQLite ledger, verified durable projection delivery, incremental FTS5 candidate discovery, selected canonical object rehydration, conservative paired experience attribution, held-out contextual applicability hypotheses, provenance-complete non-executable procedure candidates, and bounded non-executable canary plans with advisory review. APIs may change while durable authenticated learning records, canonical canary trials and receipts, procedure lifecycle, artifact storage, and longitudinal benchmarks are established.
+Foundational kernel, deterministic state adjudicator, capability-gated transition verifier, crash-safe canonical SQLite ledger, verified durable projection delivery, incremental FTS5 candidate discovery, selected canonical object rehydration, conservative paired experience attribution, held-out contextual applicability hypotheses, provenance-complete non-executable procedure candidates, bounded non-executable canary plans with advisory review, and evidence-backed process-local canary host receipts. APIs may change while durable authenticated learning records, complete held-out canary assessment, procedure lifecycle, artifact storage, and longitudinal benchmarks are established.
 
 
 ## Canonical canary host receipts

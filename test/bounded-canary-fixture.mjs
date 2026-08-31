@@ -616,13 +616,14 @@ function buildCanaryFixture(prefix, options = {}) {
     candidate: base.candidate,
     planEvidence: base.planEvidence,
     scheduler: { record: base.planEvidence.runtime.scheduler },
+    harness: { record: base.planEvidence.runtime.harness },
     observer: { record: base.planEvidence.runtime.observer },
     verifier: { record: base.planEvidence.runtime.verifier },
     rollbackController: { record: base.planEvidence.runtime.rollbackController },
   };
 }
 
-function issuePlan(bundle) {
+function issuePlan(bundle, budgetOverrides = {}) {
   const input = planInput(
     bundle.scenario,
     bundle.candidate,
@@ -632,6 +633,7 @@ function issuePlan(bundle) {
     ...input.budget,
     maxToolCalls: 8,
     maxCostMicros: 100_000,
+    ...budgetOverrides,
   };
   input.stopConditions = input.stopConditions.map((condition) =>
     condition.category === 'quality'

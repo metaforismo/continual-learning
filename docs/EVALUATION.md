@@ -279,11 +279,58 @@ Reject or classify explicitly:
 
 ### Allowed claim
 
-Until canonical assignments and real trial receipts exist, the allowed claim is limited to:
+Until complete hosted trial assessment exists, the allowed planning claim is limited to:
 
 > The kernel constructs and independently reviews an immutable, evidence-bound, bounded,
 > non-executable canary plan and rejects the documented lineage, privacy, identity, budget,
 > stopping, rollback, and authority violations in deterministic tests.
+
+
+## Canonical canary host-receipt evaluation
+
+Evaluate the receipt boundary independently from planning and independently from treatment/control
+assessment. Tests may simulate external host evidence, but the receipt module must never schedule or
+execute the represented action.
+
+### Positive construction
+
+From one exact reviewed plan, verify the complete process-local path:
+
+- deterministic subject admission recovers the plan arm rather than accepting caller choice;
+- runner identity is tied to the planned harness family and the external grant to the scheduler family;
+- completion closes the active subject slot and retains terminal status, run/cumulative cost, and run/cumulative tool calls;
+- observer samples advance monotonically and stop evaluation consumes the complete admitted prefix;
+- triggered rollback preserves succeeded, partial, and failed outcomes as evidence;
+- canonical outcome verification binds the exact run, procedure, population manifest, verifier class, and exact canonical evidence;
+- every result remains immutable, content-addressed, and authority-negative.
+
+### Adversarial matrix
+
+Reject or preserve explicitly:
+
+- split-evidence laundering, where the exact digest and expected source family come from different records;
+- planned component identity evidence reused directly as an admission, grant, completion, observation, rollback, or verification action receipt;
+- runner identities outside the planned harness lineage;
+- stale/forked canonical fingerprints and evidence that was unavailable at action time or is restricted now;
+- unknown top-level or nested runner fields carrying authority-like claims;
+- duplicate/conflicting admission, run, completion, metric sequence, evaluation, rollback, or outcome identities;
+- skipped or overlapping retries, retry after success, concurrency overflow, and cumulative resource overflow;
+- omitted admitted monitoring samples, undeclared metrics, regressing sequence/sample/time, and forged observation sets;
+- monitoring prefixes admitted beyond the evaluator's count or canonical representation bounds;
+- rollback without a triggered rollback condition or with the wrong controller lineage;
+- outcome events for another run, procedure, population, time interval, verifier family, model-only verifier class, or a human label without exact human-explicit evidence;
+- internal-core receipts and structural clones presented as guarded public capabilities;
+- a logical retry presented against a canonical tail different from the original receipt snapshot;
+- any implicit scheduling, execution, rollback invocation, or procedure promotion authority.
+
+### Allowed claim
+
+Until a complete durable experiment registry and held-out reducer exist, the allowed claim is:
+
+> The kernel validates evidence-backed, process-local receipts for externally performed canary host
+> actions and rejects the documented lineage, identity, retry, meter, monitoring, outcome, and
+> authority violations in deterministic tests. It does not execute the canary, prove host
+> completeness, or demonstrate a treatment effect.
 
 ## Evidence ladder
 
@@ -293,7 +340,7 @@ Architecture, invariants, threat model, and tests over hand-built cases. No capa
 
 ### Level 1 — deterministic kernel
 
-Replay, evidence, bitemporal state, adjudication, transition verification, quarantine, activation, compilation, conservative attribution, held-out applicability, non-executable procedure-candidate, change-feed delivery, and selected-object-read invariants pass locally and in CI.
+Replay, evidence, bitemporal state, adjudication, transition verification, quarantine, activation, compilation, conservative attribution, held-out applicability, non-executable procedure-candidate and canary-plan, guarded canary-receipt, change-feed delivery, and selected-object-read invariants pass locally and in CI.
 
 Allowed claim: "the kernel enforces these tested contracts."
 
