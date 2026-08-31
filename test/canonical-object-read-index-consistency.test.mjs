@@ -11,12 +11,13 @@ const DIGEST_B = `sha256:${'b'.repeat(64)}`;
 const DIGEST_C = `sha256:${'c'.repeat(64)}`;
 const DIGEST_D = `sha256:${'d'.repeat(64)}`;
 
-function checkpoint() {
+function checkpoint(overrides = {}) {
   return Object.freeze({
     cursorDigest: DIGEST_A,
     revision: 7,
     lastBatchId: DIGEST_B,
     configurationDigest: DIGEST_C,
+    ...overrides,
   });
 }
 
@@ -65,6 +66,36 @@ test('bounded address rehydration fails closed when individual lookups cross a c
     (error) =>
       error instanceof CanonicalObjectReadIndexIntegrityError &&
       /crossed a projection checkpoint boundary/.test(error.message),
+  );
+});
+
+test('bounded address rehydration rechecks the current checkpoint before returning', () => {
+  const index = unconstructedIndex();
+  let checkpointReads = 0;
+  Object.defineProperty(index, 'currentCheckpoint', {
+    value: () => {
+      checkpointReads += 1;
+      return checkpointReads < 3
+        ? checkpoint()
+        : checkpoint({ cursorDigest: DIGEST_D, revision: 8 });
+    },
+    configurable: true,
+  });
+  Object.defineProperty(index, 'lookupEvidence', {
+    value: () => selectedProof(),
+    configurable: true,
+  });
+
+  assert.throws(
+    () =>
+      index.rehydrateAddresses(
+        {},
+        [{ kind: 'evidence', canonicalId: 'evidence/one' }],
+        { scopeChain: ['project/object-read'] },
+      ),
+    (error) =>
+      error instanceof CanonicalObjectReadIndexIntegrityError &&
+      /advanced during the compound read/.test(error.message),
   );
 });
 
