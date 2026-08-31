@@ -173,8 +173,7 @@ Model-generated state is not automatically authoritative. Candidates enter quara
 
 ### 4. Verify the transition
 
-The implemented v1 verifier binds a proposal to an exact ledger fingerprint, replays all operations in
-an isolated kernel, computes the exact projection delta, and evaluates:
+The implemented v1 verifier binds a proposal to an exact ledger fingerprint, replays all operations in an isolated kernel, computes the exact projection delta, and evaluates:
 
 - mechanical coverage — each declared input is used or explicitly ignored, and used evidence was declared;
 - projection preservation — no lifecycle/availability change occurs outside explicit event targets;
@@ -187,9 +186,7 @@ an isolated kernel, computes the exact projection delta, and evaluates:
 - replay consistency — policy, verifier, proposal, append, and result are content-addressed;
 - resource bounds — operations, evidence fan-in, checks, state assertions, scopes, and canonical size are capped.
 
-The process-local `TransitionVerifier` is the commit capability. A pure verdict from
-`verifyTransition` is inspectable but cannot commit through that capability unless the exact runtime
-issued it.
+The process-local `TransitionVerifier` is the commit capability. A pure verdict from `verifyTransition` is inspectable but cannot commit through that capability unless the exact runtime issued it.
 
 ### 5. Commit the append
 
@@ -222,7 +219,23 @@ session -> project -> user -> global
 
 The router may combine lexical, vector, temporal, entity, causal, and procedural indexes.
 
-### 3. Build a sparse activation frontier
+### 3. Rehydrate selected canonical objects
+
+Candidate indexes return addresses, not truth. Evidence and claim IDs selected by lexical or future vector/graph retrievers pass through the canonical object-read projection.
+
+The selected read verifies:
+
+- exact object identity;
+- current or historical transaction-time version;
+- claim world-valid interval when requested;
+- current privacy overlay;
+- selected bucket and sparse path;
+- projection configuration and current canonical cursor;
+- one checkpoint across bounded compound reads and provenance closure.
+
+This removes lifetime replay from the normal selected-object path while keeping the projection derived, rebuildable, and fail-closed. See [Canonical object read index](CANONICAL_OBJECT_READ_INDEX.md).
+
+### 4. Build a sparse activation frontier
 
 Direct cues activate candidate nodes. Activation may spread over learned associations, with:
 
@@ -234,11 +247,11 @@ Direct cues activate candidate nodes. Activation may spread over learned associa
 - authority and utility signals;
 - explicit negative and contraindication edges.
 
-### 4. Adjudicate state
+### 5. Adjudicate state
 
 Resolve current versus stale claims before prompt assembly. When no justified winner exists, preserve ambiguity or mark current state unknown instead of inventing certainty.
 
-### 5. Compile the working context
+### 6. Compile the working context
 
 The compiler chooses evidence packets under a hard budget. It must be:
 
@@ -250,7 +263,7 @@ The compiler chooses evidence packets under a hard budget. It must be:
 - able to include multiple procedures and memories together;
 - able to leave most activated objects outside the prompt.
 
-### 6. Iterative callback
+### 7. Iterative callback
 
 Retrieval is not a single pre-generation top-k operation. During reasoning, the model or controller may ask to:
 
@@ -364,6 +377,7 @@ A target read pipeline is:
 partition routing
   -> approximate / lexical candidate lookup
   -> 1k-scale candidate set
+  -> selected canonical object rehydration
   -> sparse associative expansion
   -> 100-scale activated state
   -> 10-50 materialized packets
@@ -371,17 +385,23 @@ partition routing
 
 No request should scan the entire history or rebuild a global graph.
 
+The object-read fast path verifies one selected bucket and a sparse path of configured depth. Full projection audit and rebuild remain explicit forensic operations rather than mandatory work on every lookup.
+
 ### Bounded write cost
 
-The implemented durable ledger v1 intentionally performs full prefix and receipt-history verification before each new commit, so publication remains `O(N)` in lifetime history. This is the correctness baseline, not the final scale architecture. A later hash-chain cursor and verified change feed must reduce the normal append path to `O(k)` without weakening atomic audit/receipt publication. Expensive extraction, indexing, association learning, and consolidation should remain incremental, idempotent, checkpointed, and safe to retry.
+The durable ledger v1 still performs full prefix and receipt-history verification before each canonical commit, so canonical publication remains `O(N + append)` in lifetime history. That is the correctness baseline, not the final scale architecture.
+
+Downstream projection delivery is now bounded by the verified change feed: registered consumers process exact contiguous batches and commit projection mutation, receipt, and cursor atomically. Expensive extraction, indexing, association learning, and consolidation should remain incremental, idempotent, checkpointed, and safe to retry.
 
 ### Index independence
 
 Indexes are caches over canonical events. They may lag, fail, or be replaced without changing truth. Every retrieval result includes index/version metadata so regressions are diagnosable.
 
+The canonical object-read sparse roots are currently stored inside the derived projection boundary. They detect partial and incoherent corruption, but they are not yet an independently authenticated host commitment. Arbitrary coherent replacement of the whole derived database remains a documented limitation, not a solved security property.
+
 ## Invariants implemented now
 
-The current kernel enforces a first subset:
+The current kernel enforces:
 
 1. event ids are unique, schema-versioned, and sequence/transaction time are monotonic;
 2. persisted values are immutable single-read JSON snapshots; dangerous keys remain data rather than mutating prototypes;
@@ -407,11 +427,6 @@ The current kernel enforces a first subset:
 22. unverified successes cannot manufacture procedure confidence;
 23. procedure promotion requires cross-context evidence and counterexample search;
 24. dependency closures cannot bypass context packet caps;
-25. durable canonical writes require an exact ledger-issued cursor and the exact accepted result capability issued by the configured verifier;
-26. canonical event bytes, audit, receipt, both hash-chain heads, and cursor metadata publish atomically under SQLite compare-and-swap;
-27. startup and new durable commits perform full semantic event and receipt/audit history verification;
-28. canonical SQLite identity and integrity text is verified against its exact stored UTF-8 bytes;
-29. real-process failure before `COMMIT` leaves no event, audit, receipt, or cursor fragment;
 25. multi-event memory updates are staged atomically against an exact base fingerprint;
 26. proposed writes cannot omit declared evidence silently or use undeclared evidence;
 27. state-changing proposals must declare and verify the actual affected claim keys;
@@ -419,7 +434,19 @@ The current kernel enforces a first subset:
 29. tainted authoritative claims, associations, and outcomes cannot auto-commit without security evidence;
 30. only the trusted verifier runtime that issued an accepted result can commit it;
 31. accepted results retain only a content-addressed append, not a copy of historical memory;
-32. transition proposals are bounded by policy-defined operation, scope, evidence, check, assertion, and size limits.
+32. transition proposals are bounded by policy-defined operation, scope, evidence, check, assertion, and size limits;
+33. durable canonical writes require an exact ledger-issued cursor and the exact accepted result capability issued by the configured verifier;
+34. canonical event bytes, audit, receipt, both hash-chain heads, and cursor metadata publish atomically under SQLite compare-and-swap;
+35. startup and new durable commits perform full semantic event and receipt/audit history verification;
+36. canonical SQLite identity and integrity text is verified against its exact stored UTF-8 bytes;
+37. real-process failure before `COMMIT` leaves no event, audit, receipt, or cursor fragment;
+38. new change-feed consumers start at genesis unless history skipping is explicit;
+39. projection mutation, durable consumer receipt, and consumer cursor commit atomically;
+40. current FTS and object reads refuse a consumer cursor behind the canonical tail;
+41. selected object reads verify exact current/history rows, deterministic buckets, sparse paths, and cursor-bound metadata;
+42. current evidence restriction/deletion suppresses content even in historical object views;
+43. compound address and provenance reads cannot silently mix projection checkpoints;
+44. selected-object projections remain derived and rebuildable; they never authorize canonical repair.
 
 ## Durable delivery and projection consumption
 
@@ -432,31 +459,20 @@ canonical cursor N
     -> projection mutation + receipt + consumer cursor M
 ```
 
-A new feed starts at genesis unless tail skipping is explicit. Consumer registration binds the
-initial completeness boundary, configuration digest, and an exclusive non-overlapping lowercase SQL
-namespace before any batch is applied. Batch identity is stable for one exact canonical range even when
-the ledger tail advances later; retry preserves the same outstanding capability. Projection callbacks
-run synchronously through a revocable namespace-scoped capability. Cross-consumer SQL, joins,
-subqueries, transaction control, metadata mutation, schema drift, or required-PRAGMA drift fail and
-roll back.
+A new feed starts at genesis unless tail skipping is explicit. Consumer registration binds the initial completeness boundary, configuration digest, and an exclusive non-overlapping lowercase SQL namespace before any batch is applied. Batch identity is stable for one exact canonical range even when the ledger tail advances later; retry preserves the same outstanding capability. Projection callbacks run synchronously through a revocable namespace-scoped capability. Cross-consumer SQL, joins, subqueries, transaction control, metadata mutation, schema drift, or required-PRAGMA drift fail and roll back.
 
-The consumer cursor is derived-state metadata, not canonical truth. Losing a projection database may
-require replay from its registered initial cursor, but it never authorizes rewriting the canonical
-ledger.
+The consumer cursor is derived-state metadata, not canonical truth. Losing a projection database may require replay from its registered initial cursor, but it never authorizes rewriting the canonical ledger.
 
 ### Feed-driven lexical projection
 
-The FTS5 feed consumer is one concrete durable consumer. It starts at genesis and incrementally
-maintains searchable evidence/claim documents plus evidence-to-claim reverse dependencies. Privacy
-transitions remove searchable text in the same transaction as the consumer receipt and cursor.
-Restoration that would require discarded plaintext fails with an explicit rebuild-required verdict.
+The FTS5 feed consumer starts at genesis and incrementally maintains searchable evidence/claim documents plus evidence-to-claim reverse dependencies. Privacy transitions remove searchable text in the same transaction as the consumer receipt and cursor. Restoration that would require discarded plaintext fails with an explicit rebuild-required verdict.
 
-Search is bound to the feed's current durable tail: an internally consistent projection that is behind
-canonical memory emits no candidates. Returned rows remain addresses only and must be canonically
-rehydrated before state adjudication or context materialization. Selected candidate buckets are
-recomputed against their stored manifests so coherent document+FTS-row corruption cannot silently
-become a hit under an unchanged manifest.
+Search is bound to the feed's current durable tail: an internally consistent projection that is behind canonical memory emits no candidates. Returned rows remain addresses only. Selected candidate buckets are recomputed against their stored manifests so coherent document+FTS-row corruption cannot silently become a hit under an unchanged manifest.
 
-The update path is incremental, but canonical rehydration is still a lifetime-history operation in v1.
-A later canonical object-read index must remove that `O(N)` read-path dependency without promoting the
-FTS cache into canonical truth.
+### Canonical object-read projection
+
+The canonical object-read consumer starts at genesis and maintains current heads plus immutable bitemporal versions for evidence and claims. Each batch updates only objects touched by the append, refreshes their deterministic head/version buckets, and advances sparse authenticated paths before the projection receipt and cursor commit.
+
+A selected read does not request lifetime events from the canonical ledger. It verifies the exact direct row, selected bucket, sparse path, root metadata, consumer checkpoint, and current canonical tail. Claim provenance closure follows exact evidence references. Current availability overlays historical evidence so restricted or deleted preview content cannot resurface.
+
+Full `audit()` still scans the derived projection and rebuild still replays canonical history. Those explicit `O(N)` operations remain necessary for forensic verification and recovery. Internally stored roots do not yet replace an independent host-authenticated commitment.
