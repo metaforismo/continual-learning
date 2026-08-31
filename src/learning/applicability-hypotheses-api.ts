@@ -3,12 +3,18 @@ import {
   isIssuedApplicabilityHypothesisCandidate as isIssuedCandidateCore,
   isIssuedApplicabilityObservation as isIssuedObservationCore,
   validateApplicabilityHypothesis as validateApplicabilityHypothesisCore,
+  verifyApplicabilityObservation as verifyApplicabilityObservationCore,
   type ApplicabilityHypothesisCandidate,
   type ApplicabilityHypothesisInput,
+  type ApplicabilityObservationInput,
   type ApplicabilityValidationInput,
   type VerifiedApplicabilityHypothesis,
   type VerifiedApplicabilityObservation,
 } from './applicability-hypotheses.js';
+import type {
+  MemoryInterventionInput,
+  VerifiedExperienceTrace,
+} from './experience-attribution-api.js';
 import { canonicalJson } from '../retrieval/canonical.js';
 
 export {
@@ -19,7 +25,6 @@ export {
   isIssuedApplicabilityHypothesisCandidate,
   isIssuedApplicabilityObservation,
   isIssuedVerifiedApplicabilityHypothesis,
-  verifyApplicabilityObservation,
 } from './applicability-hypotheses.js';
 
 export type {
@@ -37,8 +42,13 @@ export type {
   VerifiedApplicabilityObservation,
 } from './applicability-hypotheses.js';
 
-const MAX_OBSERVATIONS = 4_096;
+const MAX_IDENTIFIERS = 4_096;
 const MAX_INPUT_CHARACTERS = 1_000_000;
+const MAX_IDENTIFIER_CHARACTERS = 512;
+
+const issuedObservationIds = new Set<string>();
+const issuedCandidateIds = new Set<string>();
+const issuedValidationIds = new Set<string>();
 
 function deepFreeze<T>(value: T): T {
   if (value !== null && typeof value === 'object' && !Object.isFrozen(value)) {
@@ -58,15 +68,19 @@ function canonicalSnapshot<T>(value: T, label: string): T {
   return deepFreeze(JSON.parse(encoded) as T);
 }
 
+function snapshotArray<T>(values: readonly T[], label: string): readonly T[] {
+  if (!Array.isArray(values)) throw new TypeError(`${label} must be an array`);
+  if (values.length > MAX_IDENTIFIERS) {
+    throw new RangeError(`${label} cannot exceed ${MAX_IDENTIFIERS} entries`);
+  }
+  return Object.freeze(Array.from(values));
+}
+
 function snapshotObservations(
   values: readonly VerifiedApplicabilityObservation[],
   label: string,
 ): readonly VerifiedApplicabilityObservation[] {
-  if (!Array.isArray(values)) throw new TypeError(`${label} must be an array`);
-  if (values.length > MAX_OBSERVATIONS) {
-    throw new RangeError(`${label} cannot exceed ${MAX_OBSERVATIONS} entries`);
-  }
-  const snapshot = Object.freeze(Array.from(values));
+  const snapshot = snapshotArray(values, label);
   for (const observation of snapshot) {
     if (!isIssuedObservationCore(observation)) {
       throw new Error(`${label} requires issued observation capabilities`);
@@ -75,13 +89,24 @@ function snapshotObservations(
   return snapshot;
 }
 
+function assertUnusedId(value: unknown, ids: Set<string>, label: string): asserts value is string {
+  if (
+    typeof value !== 'string' ||
+    value.trim().length === 0 ||
+    value.length > MAX_IDENTIFIER_CHARACTERS ||
+    value.includes('\u0000')
+  ) {
+    throw new Error(`${label} must be non-empty bounded text without U+0000`);
+  }
+  if (ids.has(value)) throw new Error(`${label} is already issued: ${value}`);
+}
+
 function selectedForManifestCheck(
   observations: readonly VerifiedApplicabilityObservation[],
   idsInput: readonly string[],
   label: string,
 ): readonly VerifiedApplicabilityObservation[] {
-  if (!Array.isArray(idsInput)) throw new TypeError(`${label} observation ids must be an array`);
-  const ids = Object.freeze(Array.from(idsInput));
+  const ids = snapshotArray(idsInput, `${label} observation ids`);
   const selected: VerifiedApplicabilityObservation[] = [];
   for (const id of ids) {
     const matches = observations.filter((observation) => observation.id === id);
@@ -118,6 +143,21 @@ function assertConsistentFeatureManifests(
   }
 }
 
+/** Public observation boundary with single-read inputs and process-local unique ids. */
+export function verifyApplicabilityObservation(
+  tracesInput: readonly VerifiedExperienceTrace[],
+  interventionInput: MemoryInterventionInput,
+  observationInput: ApplicabilityObservationInput,
+): VerifiedApplicabilityObservation {
+  const traces = snapshotArray(tracesInput, 'applicability trial traces');
+  const intervention = canonicalSnapshot(interventionInput, 'applicability intervention input');
+  const input = canonicalSnapshot(observationInput, 'applicability observation input');
+  assertUnusedId(input.id, issuedObservationIds, 'applicability observation id');
+  const observation = verifyApplicabilityObservationCore(traces, intervention, input);
+  issuedObservationIds.add(observation.id);
+  return observation;
+}
+
 /** Public induction boundary with single-read inputs and feature-manifest consistency. */
 export function induceApplicabilityHypothesis(
   observationsInput: readonly VerifiedApplicabilityObservation[],
@@ -125,13 +165,16 @@ export function induceApplicabilityHypothesis(
 ): ApplicabilityHypothesisCandidate {
   const observations = snapshotObservations(observationsInput, 'discovery observations');
   const request = canonicalSnapshot(requestInput, 'applicability hypothesis request');
+  assertUnusedId(request.id, issuedCandidateIds, 'applicability hypothesis id');
   const selected = selectedForManifestCheck(
     observations,
     request.discoveryObservationIds,
     'discovery',
   );
   assertConsistentFeatureManifests(selected, 'discovery');
-  return induceApplicabilityHypothesisCore(observations, request);
+  const candidate = induceApplicabilityHypothesisCore(observations, request);
+  issuedCandidateIds.add(candidate.id);
+  return candidate;
 }
 
 /** Public held-out validation boundary with the same fail-closed input contract. */
@@ -145,11 +188,14 @@ export function validateApplicabilityHypothesis(
   }
   const observations = snapshotObservations(observationsInput, 'validation observations');
   const request = canonicalSnapshot(requestInput, 'applicability validation request');
+  assertUnusedId(request.id, issuedValidationIds, 'applicability validation id');
   const selected = selectedForManifestCheck(
     observations,
     request.validationObservationIds,
     'validation',
   );
   assertConsistentFeatureManifests(selected, 'validation');
-  return validateApplicabilityHypothesisCore(candidate, observations, request);
+  const validation = validateApplicabilityHypothesisCore(candidate, observations, request);
+  issuedValidationIds.add(validation.id);
+  return validation;
 }
