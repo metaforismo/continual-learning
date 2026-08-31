@@ -91,11 +91,12 @@ The foundational TypeScript kernel currently includes:
 - a registered durable consumer store that binds configuration, initial completeness, and an exclusive SQL-object prefix, then commits a revocable projection mutation, receipt, and cursor in one hardened SQLite transaction;
 - an FTS5 canonical change-feed consumer that incrementally maintains lexical documents and reverse dependencies, scrubs restricted evidence and dependent claims, refuses stale canonical tails, and falls back to explicit rebuild when discarded plaintext would be required;
 - an authenticated, rebuildable canonical object-read projection with exact evidence/claim lookup, bitemporal versions, current privacy overlays, provenance closure, sparse integrity proofs, current-tail gating, and checkpoint-consistent compound reads without lifetime replay;
+- deterministic experience attribution that separates activated, materialized, consulted, and applied memories; binds traces to canonical outcomes and evidence; requires exact target-withheld paired interventions for causal credit; and preserves duplicated, mixed, negative, neutral, and insufficient evidence without granting procedure or execution authority;
 - a rebuildable SQLite FTS5 projection that emits addresses only, binds generations to canonical fingerprints and privacy configuration, detects row/manifest corruption, and requires canonical rehydration;
 - a checkpointed FTS5 diff publisher with exact-prefix verification, changed-row repair, privacy-filtered reverse dependencies, hash-chained checkpoints, fixed bucket manifests, and cache-independent rehydration;
 - procedure promotion gates based on independent evidence, verified outcomes, counterexample search, applicability boundaries, failure rate, and Wilson confidence bounds.
 
-The correctness kernel remains model- and harness-agnostic. The durable SQLite ledger is canonical storage; SQLite FTS5 and the canonical object-read index remain rebuildable derived projections. No embedding provider, LLM dependency, or DeepSeek Harness coupling defines canonical memory semantics.
+The correctness kernel remains model- and harness-agnostic. The durable SQLite ledger is canonical storage; SQLite FTS5 and the canonical object-read index remain rebuildable derived projections. Experience-attribution objects are process-local learning evidence in v1, not canonical mutations or execution capabilities. No embedding provider, LLM dependency, or DeepSeek Harness coupling defines canonical memory semantics.
 
 ## Run locally
 
@@ -106,7 +107,7 @@ npm install
 npm test
 ```
 
-The test suite currently exercises 247 foundational, state, transition, durable-ledger, change-feed, consumer-transaction, lexical-projection, and selected-object-read scenarios.
+The test suite currently exercises 267 foundational, state, transition, durable-ledger, change-feed, consumer-transaction, lexical-projection, selected-object-read, and experience-attribution scenarios.
 
 ## Documentation
 
@@ -121,6 +122,7 @@ The test suite currently exercises 247 foundational, state, transition, durable-
 - [Durable consumer checkpoints](docs/DURABLE_CONSUMER_CHECKPOINTS.md)
 - [FTS5 canonical change-feed consumer](docs/FTS5_FEED_CONSUMER.md)
 - [Canonical object read index](docs/CANONICAL_OBJECT_READ_INDEX.md)
+- [Verified experience attribution](docs/EXPERIENCE_ATTRIBUTION.md)
 - [Learning contract](docs/LEARNING_CONTRACT.md)
 - [Failure modes and mitigations](docs/FAILURE_MODES.md)
 - [Evaluation and evidence ladder](docs/EVALUATION.md)
@@ -139,10 +141,12 @@ The repository does **not** currently claim:
 - resistance to all memory poisoning;
 - improvement from online weight updates;
 - production scalability;
-- benchmark superiority over existing systems.
+- benchmark superiority over existing systems;
+- causal utility from ordinary successful co-occurrence;
+- automatic procedure promotion or tool-execution authority.
 
 Those claims must be earned independently through the evidence ladder.
 
 ## Status
 
-Foundational kernel, deterministic state adjudicator, capability-gated transition verifier, crash-safe canonical SQLite ledger, verified durable projection delivery, incremental FTS5 candidate discovery, and selected canonical object rehydration with provenance and temporal semantics. APIs may change while causal experience attribution, applicability learning, authenticated external projection commitments, artifact storage, and longitudinal evaluation boundaries are established.
+Foundational kernel, deterministic state adjudicator, capability-gated transition verifier, crash-safe canonical SQLite ledger, verified durable projection delivery, incremental FTS5 candidate discovery, selected canonical object rehydration, and conservative paired experience attribution. APIs may change while contextual applicability learning, durable authenticated attribution, procedure candidates, canary evaluation, artifact storage, and longitudinal benchmarks are established.
