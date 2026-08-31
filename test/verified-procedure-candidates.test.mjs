@@ -188,6 +188,7 @@ test('a validated applicability boundary yields an immutable, provenance-complet
   assert.equal(candidate.canaryPlanAuthorized, false);
   assert.equal(candidate.executionAuthorized, false);
   assert.equal(candidate.risk, 'medium');
+  assert.equal(candidate.canonicalEventCount, fixture.scenario.events().length);
   assert.equal(candidate.steps.length, 3);
   assert.equal(candidate.dependencies.length, 2);
   assert.equal(candidate.contraindications.length, 2);

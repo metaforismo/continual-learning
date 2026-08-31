@@ -342,6 +342,22 @@ canaryPlanAuthorized = false
 executionAuthorized = false
 ```
 
+### Canary planning
+
+The implemented bounded canary-plan boundary consumes only an exact process-issued procedure candidate. It records the candidate's canonical prefix, inherited evidence identities, applicability, verification, rollback, and risk; deterministically partitions a bounded applicable population into non-empty treatment and control arms; and binds budget, sandbox, network, tool, runtime, stopping, and rollback contracts into one immutable intent digest. Each declared runtime component digest requires exact digest-matching `verifies` evidence.
+
+Planning and later review recheck that the candidate or plan prefix is an ancestor of the supplied canonical history and that inherited evidence is still currently available. Independent review is advisory only:
+
+```text
+status = planned | reviewed
+executable = false
+hostSchedulingAuthorized = false
+procedurePromotionAuthorized = false
+executionAuthorized = false
+```
+
+A plan therefore cannot schedule a trial, mint a runtime capability, or execute a tool. Canonical assignments, monotonic resource receipts, complete trial registration, verified outcomes, and fail-safe reduction remain the next boundary.
+
 A procedure can coexist with another procedure for a different context. The system should learn a mixture or router rather than forcing a universal rewrite.
 
 ### Controller learning

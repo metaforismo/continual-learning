@@ -25,6 +25,10 @@ The project treats the following as first-class threats:
 - a policy/tool artifact masquerading as human verification;
 - mutating procedure candidates underdeclaring risk or claiming disable-only rollback;
 - evidence-backed procedure candidates being mistaken for scheduling or execution authority;
+- canary runtime identities being accepted without exact digest-matching verifier evidence;
+- forked candidate or plan lineage being reviewed as current;
+- restricted candidate or plan provenance remaining eligible after privacy changes;
+- advisory canary review being mistaken for scheduling or execution authority;
 - concurrent write anomalies and replay inconsistency;
 - consumer bootstrap that silently skips canonical history;
 - projection code advancing offsets without the corresponding derived-state mutation;
@@ -131,6 +135,41 @@ or durable authorization. The module semantically replays the supplied history a
 to provide the real canonical prefix and authentic evidence bytes. It does not schedule canaries,
 execute instructions, attest tools or humans, or propagate deletion into a durable candidate store.
 Those remain separate future boundaries.
+
+### Bounded canary-plan boundary
+
+A bounded canary plan is data, not a scheduling or execution capability. It accepts only an exact
+issued procedure candidate, preserves its applicability, verification, rollback, risk, source
+identities, and canonical prefix, and rechecks the current privacy state of inherited evidence.
+The plan records its own canonical fingerprint and event count so a later review can prove that the
+exact planning prefix remains an ancestor of the supplied history rather than accepting a fresh
+fingerprint from an unrelated fork.
+
+Population entries are caller-supplied opaque subject digests. The boundary rejects obvious raw
+identity fields, duplicates, inapplicable subjects, and empty treatment/control arms, but it does
+not prove unlinkability or prevent a trusted caller from encoding identifying data into a digest.
+Deployments must construct population manifests inside their tenant and privacy boundary.
+
+Scheduler, harness, observer, verifier, rollback-controller, and environment identities require
+separate canonical evidence whose content hash exactly matches each declared digest and whose role
+includes `verifies`. This is evidence binding, not remote attestation. The host remains responsible
+for authenticating the actual runtime components.
+
+Plans enforce coherent resource budgets, sandbox/network/tool policy, risk-dependent caps,
+quality/cost/safety/security stop conditions, and rollback coverage. Destructive candidates are
+rejected. Independent review cannot reuse the plan author or inherited source families, and all
+candidate and plan evidence is checked again under the current privacy overlay. Even an approved
+review remains:
+
+```text
+executable = false
+hostSchedulingAuthorized = false
+procedurePromotionAuthorized = false
+executionAuthorized = false
+```
+
+Canonical assignment receipts, complete trial registries, monotonic resource accounting, verified
+outcomes, stop execution, and rollback receipts are not implemented by this boundary.
 
 ### Reversible learning
 

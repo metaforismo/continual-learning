@@ -246,6 +246,45 @@ Until durable admission and real canary trials exist, the allowed claim is limit
 > issued held-out applicability result and rejects the documented provenance, identity, risk, and
 > authority violations in deterministic tests.
 
+## Verified bounded-canary-plan evaluation
+
+Evaluate planning independently from procedure-candidate construction and independently from future
+trial execution. A correct plan test does not schedule a task or invoke a tool.
+
+### Positive construction
+
+From an exact issued procedure candidate and canonical evidence, verify that a plan preserves:
+
+- the exact candidate, applicability, verification, rollback, risk, canonical-prefix, and provenance lineage;
+- deterministic non-empty treatment and control assignment for the same normalized population;
+- coherent trial, concurrency, subject, wall-clock, token, tool-call, external-action, and cost budgets;
+- explicit sandbox, network, and tool policy;
+- exact digest-matching verifier evidence for scheduler, harness, observer, verifier, rollback controller, and environment identities;
+- quality, cost, safety, and security stopping with complete rollback coverage;
+- independent advisory review without scheduling, execution, or promotion authority.
+
+### Adversarial matrix
+
+Reject or classify explicitly:
+
+- cloned candidate or plan capabilities and conflicting process-local IDs;
+- stale, truncated, or forked candidate/plan canonical prefixes;
+- backdated plans or reviews;
+- unavailable, restricted, deleted, cross-scope, or secret inherited/plan/review evidence;
+- runtime component digests backed only by unrelated evidence;
+- duplicate subjects, raw identity fields, inapplicable populations, or empty trial arms;
+- incoherent budgets, high-risk over-allocation, missing safety/security stops, and incomplete rollback coverage;
+- destructive candidates, unsafe mutative rollback, reused review source families, and reviewer/author identity reuse;
+- any implicit host scheduling, tool execution, or procedure-promotion authority.
+
+### Allowed claim
+
+Until canonical assignments and real trial receipts exist, the allowed claim is limited to:
+
+> The kernel constructs and independently reviews an immutable, evidence-bound, bounded,
+> non-executable canary plan and rejects the documented lineage, privacy, identity, budget,
+> stopping, rollback, and authority violations in deterministic tests.
+
 ## Evidence ladder
 
 ### Level 0 — specification
