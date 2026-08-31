@@ -150,3 +150,14 @@ The adapter may begin earlier for experiments, but it is not allowed to define t
 - proof that measured gains live in learned parameters rather than hidden retrieval.
 
 This phase is deliberately last. Parametric updates amplify unresolved provenance, forgetting, privacy, and rollback problems.
+
+
+### Canonical canary host receipts v1
+
+- [x] Evidence-backed deterministic assignment admission.
+- [x] External execution-grant plus run start/completion receipts.
+- [x] Process-local run, attempt, concurrency, cumulative-cost, and active-slot registry.
+- [x] Monotonic observer samples and complete-prefix stop evaluation.
+- [x] Trigger-bound rollback receipts that preserve partial and failed outcomes.
+- [x] Canonical `outcome.recorded` binding to the exact run and planned verifier family.
+- [ ] Next: held-out treatment/control assessment with complete coverage or explicit stopped-experiment accounting.

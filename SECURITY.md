@@ -194,3 +194,8 @@ Procedures, controller versions, adapters, and context policies must support sup
 ## Reporting a vulnerability
 
 Until a private reporting channel is published, avoid posting exploitable details in a public issue. Contact the repository owner privately through an available verified channel and include reproduction steps, affected commit, and impact.
+
+
+## Canonical canary receipt boundary
+
+Receipt APIs require exact process-issued plans/reviews and canonical evidence from the planned scheduler, runner, observer, verifier, or rollback-controller source family. Process-local registries enforce run IDs, subject attempts, concurrency, cumulative cost, monotonic monitoring, complete stop-evaluation prefixes, and atomic retries. Receipts may report that an external host acted or issued a grant; they do not create credentials, schedule work, invoke tools, roll back state, promote a procedure, or set any authority flag to true.
