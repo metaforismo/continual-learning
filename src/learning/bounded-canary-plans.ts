@@ -4,7 +4,6 @@ import {
   type Authority,
   type EvidenceRef,
   type EvidenceRole,
-  type EvidenceSensitivity,
   type EvidenceTaint,
   type MemoryEvent,
 } from '../domain.js';
@@ -37,14 +36,6 @@ const STOP_CATEGORIES = new Set(['quality', 'cost', 'safety', 'security']);
 const STOP_COMPARATORS = new Set(['gt', 'gte', 'lt', 'lte', 'eq']);
 const STOP_ACTIONS = new Set(['pause', 'abort', 'rollback']);
 const REVIEW_DECISIONS = new Set(['approve', 'request-changes', 'reject']);
-
-const SENSITIVITY_RANK: Readonly<Record<EvidenceSensitivity, number>> = Object.freeze({
-  public: 0,
-  internal: 1,
-  personal: 2,
-  sensitive: 3,
-  secret: 4,
-});
 
 const issuedPlans = new WeakSet<object>();
 const issuedReviews = new WeakSet<object>();
@@ -184,6 +175,10 @@ export interface BoundedCanaryPlan {
   readonly inheritedApplicabilityDigest: string;
   readonly inheritedVerificationDigest: string;
   readonly inheritedRollbackDigest: string;
+  readonly canonicalFingerprint: string;
+  readonly canonicalEventCount: number;
+  readonly inheritedSourceEvidenceIds: readonly string[];
+  readonly planSourceEvidenceIds: readonly string[];
   readonly inheritedSourceGroups: readonly string[];
   readonly planSourceGroups: readonly string[];
   readonly actor: string;
@@ -219,6 +214,7 @@ export interface CanaryPlanReview {
   readonly evidence: readonly ProcedureEvidenceBinding[];
   readonly reviewSourceGroups: readonly string[];
   readonly canonicalFingerprint: string;
+  readonly canonicalEventCount: number;
   readonly reviewer: string;
   readonly recordedAt: number;
   readonly reviewComplete: true;
@@ -409,6 +405,59 @@ function normalizeEvidence(
     );
   }
   return Object.freeze(bindings.sort((left, right) => left.sourceId.localeCompare(right.sourceId)));
+}
+
+function uniqueSorted(values: readonly string[]): readonly string[] {
+  return Object.freeze([...new Set(values)].sort());
+}
+
+function assertCanonicalPrefix(
+  events: readonly MemoryEvent[],
+  eventCount: number,
+  expectedFingerprint: string,
+  label: string,
+): void {
+  if (!Number.isSafeInteger(eventCount) || eventCount < 0 || eventCount > events.length) {
+    throw new Error(`${label} canonical event count is outside the supplied history`);
+  }
+  const actualFingerprint = fingerprintMemoryEvents(events.slice(0, eventCount));
+  if (actualFingerprint !== expectedFingerprint) {
+    throw new Error(`${label} canonical prefix is stale, truncated, or forked`);
+  }
+}
+
+function assertCurrentEvidenceIds(
+  sourceIds: readonly string[],
+  projection: EvidenceProjection,
+  scope: string,
+  label: string,
+): void {
+  for (const sourceId of uniqueSorted(sourceIds)) {
+    const projected = projection.get(sourceId);
+    if (projected === undefined || projected.availability !== 'available') {
+      throw new Error(`${label} is not currently available: ${sourceId}`);
+    }
+    if (projected.record.scope !== 'global' && projected.record.scope !== scope) {
+      throw new Error(`${label} crosses scope through ${sourceId}`);
+    }
+  }
+}
+
+function requireRuntimeDigestEvidence(
+  evidence: readonly ProcedureEvidenceBinding[],
+  digest: string,
+  component: string,
+): void {
+  if (
+    !evidence.some(
+      (binding) =>
+        binding.contentHash === digest && binding.roles.includes('verifies'),
+    )
+  ) {
+    throw new Error(
+      `canary runtime ${component} digest requires exact verifies evidence`,
+    );
+  }
 }
 
 function normalizeBudget(
@@ -610,7 +659,22 @@ function normalizeRuntime(
   assertDigest(input.verifierDigest, 'canary verifierDigest');
   assertDigest(input.rollbackControllerDigest, 'canary rollbackControllerDigest');
   assertDigest(input.environmentDigest, 'canary environmentDigest');
-  const evidence = normalizeEvidence(input.evidence, context, 'canary runtime evidence', 'tool-verified');
+  const evidence = normalizeEvidence(
+    input.evidence,
+    context,
+    'canary runtime evidence',
+    'tool-verified',
+  );
+  requireRuntimeDigestEvidence(evidence, input.schedulerDigest, 'scheduler');
+  requireRuntimeDigestEvidence(evidence, input.harnessDigest, 'harness');
+  requireRuntimeDigestEvidence(evidence, input.observerDigest, 'observer');
+  requireRuntimeDigestEvidence(evidence, input.verifierDigest, 'verifier');
+  requireRuntimeDigestEvidence(
+    evidence,
+    input.rollbackControllerDigest,
+    'rollback controller',
+  );
+  requireRuntimeDigestEvidence(evidence, input.environmentDigest, 'environment');
   const unsigned = {
     schedulerDigest: input.schedulerDigest,
     harnessDigest: input.harnessDigest,
@@ -770,13 +834,33 @@ export function createBoundedCanaryPlan(
     throw new Error('canary plan cannot predate its procedure candidate');
   }
   const events = MemoryKernel.from(memoryEventsInput).events();
+  const latestCanonicalEvent = events.at(-1);
+  if (
+    latestCanonicalEvent !== undefined &&
+    request.recordedAt < latestCanonicalEvent.recordedAt
+  ) {
+    throw new Error('canary plan cannot be backdated before the canonical tail it fingerprints');
+  }
   const canonicalFingerprint = fingerprintMemoryEvents(events);
   if (canonicalFingerprint !== request.canonicalFingerprint) {
     throw new Error('canary canonical fingerprint is stale or forged');
   }
+  assertCanonicalPrefix(
+    events,
+    candidate.canonicalEventCount,
+    candidate.canonicalFingerprint,
+    'procedure candidate',
+  );
+  const currentEvidence = EvidenceProjection.from(events);
+  assertCurrentEvidenceIds(
+    candidate.sourceEvidenceIds,
+    currentEvidence,
+    candidate.scope,
+    'procedure candidate evidence',
+  );
   const evidenceContext: EvidenceContext = {
     historical: EvidenceProjection.from(events, request.recordedAt),
-    current: EvidenceProjection.from(events),
+    current: currentEvidence,
     scope: candidate.scope,
     totalReferences: 0,
   };
@@ -803,6 +887,10 @@ export function createBoundedCanaryPlan(
     ...stopConditions.flatMap((condition) => condition.evidence),
     ...abort.evidence,
   ];
+  const inheritedSourceEvidenceIds = uniqueSorted(candidate.sourceEvidenceIds);
+  const planSourceEvidenceIds = uniqueSorted(
+    evidenceBindings.map((binding) => binding.sourceId),
+  );
   const planSourceGroups = aggregateSourceGroups(evidenceBindings);
   const unsigned = {
     schemaVersion: BOUNDED_CANARY_PLAN_SCHEMA_VERSION,
@@ -822,6 +910,10 @@ export function createBoundedCanaryPlan(
     inheritedApplicabilityDigest: candidate.applicability.bindingDigest,
     inheritedVerificationDigest: candidate.verification.contractDigest,
     inheritedRollbackDigest: candidate.rollback.contractDigest,
+    canonicalFingerprint,
+    canonicalEventCount: events.length,
+    inheritedSourceEvidenceIds,
+    planSourceEvidenceIds,
     inheritedSourceGroups: candidate.sourceGroups,
     planSourceGroups,
     actor: request.actor,
@@ -865,10 +957,30 @@ export function reviewBoundedCanaryPlan(
   if (request.recordedAt < plan.recordedAt) throw new Error('canary review cannot predate the plan');
   assertDigest(request.canonicalFingerprint, 'canary review canonicalFingerprint');
   const events = MemoryKernel.from(memoryEventsInput).events();
+  const latestCanonicalEvent = events.at(-1);
+  if (
+    latestCanonicalEvent !== undefined &&
+    request.recordedAt < latestCanonicalEvent.recordedAt
+  ) {
+    throw new Error('canary review cannot be backdated before the canonical tail it fingerprints');
+  }
   const canonicalFingerprint = fingerprintMemoryEvents(events);
   if (canonicalFingerprint !== request.canonicalFingerprint) {
     throw new Error('canary review canonical fingerprint is stale or forged');
   }
+  assertCanonicalPrefix(
+    events,
+    plan.canonicalEventCount,
+    plan.canonicalFingerprint,
+    'canary plan',
+  );
+  const currentEvidence = EvidenceProjection.from(events);
+  assertCurrentEvidenceIds(
+    [...plan.inheritedSourceEvidenceIds, ...plan.planSourceEvidenceIds],
+    currentEvidence,
+    plan.scope,
+    'canary plan evidence',
+  );
   if (!Array.isArray(request.findings) || request.findings.length > MAX_FINDINGS) {
     throw new Error(`canary review cannot exceed ${MAX_FINDINGS} findings`);
   }
@@ -884,7 +996,7 @@ export function reviewBoundedCanaryPlan(
   }
   const evidenceContext: EvidenceContext = {
     historical: EvidenceProjection.from(events, request.recordedAt),
-    current: EvidenceProjection.from(events),
+    current: currentEvidence,
     scope: plan.scope,
     totalReferences: 0,
   };
@@ -919,6 +1031,7 @@ export function reviewBoundedCanaryPlan(
     evidence,
     reviewSourceGroups,
     canonicalFingerprint,
+    canonicalEventCount: events.length,
     reviewer: request.reviewer,
     recordedAt: request.recordedAt,
     reviewComplete: true as const,

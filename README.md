@@ -94,6 +94,7 @@ The foundational TypeScript kernel currently includes:
 - deterministic experience attribution that separates activated, materialized, consulted, and applied memories; binds traces to canonical outcomes and evidence; requires exact target-withheld paired interventions for causal credit; preserves complete source-family lineage across duplicate experimental units; and retains mixed, negative, neutral, and insufficient evidence without granting procedure or execution authority;
 - contextual applicability hypotheses that bind schema-versioned features before paired trials begin, reuse attribution's exact unit/source-family collapse, prevent one unit or context fingerprint from being rewritten with a different feature manifest, induce bounded required/forbidden feature rules, and require disjoint held-out validation before reporting contextual generalization;
 - provenance-complete verified procedure candidates that preserve discovery and held-out lineage, require ordered typed steps with step-exclusive supportive evidence, bind dependency/verifier/checkpoint digests to authoritative canonical evidence, retain evidence-backed contraindications, enforce risk and rollback contracts, and remain explicitly non-executable;
+- bounded non-executable canary plans that preserve exact procedure/applicability lineage, bind deterministic treatment/control assignment and coherent budgets to evidence-backed runtime identities, require safety/security stopping and rollback coverage, support independent advisory review, and never grant host scheduling or execution authority;
 - a rebuildable SQLite FTS5 projection that emits addresses only, binds generations to canonical fingerprints and privacy configuration, detects row/manifest corruption, and requires canonical rehydration;
 - a checkpointed FTS5 diff publisher with exact-prefix verification, changed-row repair, privacy-filtered reverse dependencies, hash-chained checkpoints, fixed bucket manifests, and cache-independent rehydration;
 - procedure promotion gates based on independent evidence, verified outcomes, counterexample search, applicability boundaries, failure rate, and Wilson confidence bounds.
@@ -109,7 +110,7 @@ npm install
 npm test
 ```
 
-The test suite currently exercises 299 foundational, state, transition, durable-ledger, change-feed, consumer-transaction, lexical-projection, selected-object-read, experience-attribution, contextual-applicability, and verified-procedure-candidate scenarios.
+The test suite currently exercises 312 foundational, state, transition, durable-ledger, change-feed, consumer-transaction, lexical-projection, selected-object-read, experience-attribution, contextual-applicability, verified-procedure-candidate, and bounded-canary-plan scenarios.
 
 ## Documentation
 
@@ -127,6 +128,7 @@ The test suite currently exercises 299 foundational, state, transition, durable-
 - [Verified experience attribution](docs/EXPERIENCE_ATTRIBUTION.md)
 - [Contextual applicability hypotheses](docs/APPLICABILITY_HYPOTHESES.md)
 - [Verified procedure candidates](docs/VERIFIED_PROCEDURE_CANDIDATES.md)
+- [Bounded non-executable canary plans](docs/BOUNDED_CANARY_PLANS.md)
 - [Learning contract](docs/LEARNING_CONTRACT.md)
 - [Failure modes and mitigations](docs/FAILURE_MODES.md)
 - [Evaluation and evidence ladder](docs/EVALUATION.md)
@@ -154,4 +156,4 @@ Those claims must be earned independently through the evidence ladder.
 
 ## Status
 
-Foundational kernel, deterministic state adjudicator, capability-gated transition verifier, crash-safe canonical SQLite ledger, verified durable projection delivery, incremental FTS5 candidate discovery, selected canonical object rehydration, conservative paired experience attribution, held-out contextual applicability hypotheses, and provenance-complete non-executable procedure candidates. APIs may change while durable authenticated learning records, bounded canary planning and trials, procedure lifecycle, artifact storage, and longitudinal benchmarks are established.
+Foundational kernel, deterministic state adjudicator, capability-gated transition verifier, crash-safe canonical SQLite ledger, verified durable projection delivery, incremental FTS5 candidate discovery, selected canonical object rehydration, conservative paired experience attribution, held-out contextual applicability hypotheses, provenance-complete non-executable procedure candidates, and bounded non-executable canary plans with advisory review. APIs may change while durable authenticated learning records, canonical canary trials and receipts, procedure lifecycle, artifact storage, and longitudinal benchmarks are established.

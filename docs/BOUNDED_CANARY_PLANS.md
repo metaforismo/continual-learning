@@ -105,7 +105,7 @@ The plan binds content digests for:
 - rollback controller;
 - environment.
 
-The identity requires currently available, scope-authorized, non-secret evidence with `tool-verified` authority or stronger and a `verifies` or `constrains` role.
+The identity requires currently available, scope-authorized, non-secret evidence with `tool-verified` authority or stronger. Every declared component digest must be covered by exact evidence whose content hash equals that digest and whose role includes `verifies`; unrelated verifier evidence cannot attest arbitrary runtime identities.
 
 These are evidence-bound identities, not remote attestation. V1 does not prove that the named binaries were installed or invoked.
 
@@ -155,7 +155,7 @@ A mutative canary must include at least one explicit rollback trigger.
 
 ## Time, privacy, and scope
 
-The plan names the exact canonical event-history fingerprint used during admission. Every evidence reference must:
+The plan stores both the exact canonical event-history fingerprint and event count used during admission. A later review proves that this exact prefix still belongs to the supplied canonical history, then applies the current privacy overlay to both inherited candidate evidence and plan-construction evidence. Every evidence reference must:
 
 1. have existed and been available at the plan's `recordedAt`;
 2. remain currently available;
@@ -260,6 +260,7 @@ Canonical history replay remains `O(N)` in the supplied lifetime history. Popula
 V1 does not provide:
 
 - authenticated or unpredictable random assignment;
+- unlinkability of caller-supplied subject digests across populations;
 - durable cryptographic authentication of process-local capabilities;
 - remote attestation of scheduler, harness, observer, verifier, or rollback controller;
 - runtime enforcement of blast-radius budgets;
@@ -276,7 +277,9 @@ Those belong to the receipt and trusted-host boundary that follows.
 Before plans can feed a host scheduler, test at least:
 
 - cloned and forged candidate/plan/review capabilities;
-- stale canonical history and current privacy changes;
+- stale, truncated, or forked candidate and plan canonical prefixes;
+- current privacy changes affecting inherited candidate or plan evidence;
+- runtime component digests backed only by unrelated verifier evidence;
 - secret, weak, contradictory, or cross-scope evidence;
 - raw subject identity fields and duplicate units;
 - caller-order invariance;

@@ -49,7 +49,7 @@ record durable or cryptographically authenticated.
 
 ## Canonical boundary
 
-The request is bound to an exact canonical event fingerprint. Candidate creation semantically
+The request is bound to an exact canonical event fingerprint and event count. Candidate creation semantically
 replays the supplied event history and rejects:
 
 - malformed, sparse, circular, or non-canonical JSON;
@@ -80,7 +80,7 @@ risk
 verification contract
 rollback contract
 complete applicability lineage
-canonical fingerprint
+canonical fingerprint + exact canonical event count
 aggregate provenance and privacy metadata
 ```
 

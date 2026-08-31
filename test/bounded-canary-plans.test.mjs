@@ -287,12 +287,24 @@ function procedureEvidence(scenario, options = {}) {
       kind: 'document',
       authority: options.human ? 'human-explicit' : 'external-source',
     }),
+    dependency: scenario.capture('procedure-dependency', 'procedure-dependency-origin', {
+      kind: 'tool-result',
+      authority: options.human ? 'human-explicit' : 'tool-verified',
+    }),
+    verifier: scenario.capture('procedure-verifier', 'procedure-verifier-origin', {
+      kind: 'test-result',
+      authority: options.human ? 'human-explicit' : 'tool-verified',
+    }),
+    checkpoint: scenario.capture('procedure-checkpoint', 'procedure-checkpoint-origin', {
+      kind: 'environment-transition',
+      authority: options.human ? 'human-explicit' : 'tool-verified',
+    }),
   };
 }
 
 function procedureInput(scenario, refs, options = {}) {
   const mutative = options.mutative ?? false;
-  const risk = options.risk ?? 'low';
+  const risk = options.risk ?? (mutative ? 'medium' : 'low');
   const human = risk === 'high' || risk === 'destructive';
   const steps = [
     {
@@ -336,14 +348,16 @@ function procedureInput(scenario, refs, options = {}) {
       {
         id: 'auth-test-harness',
         kind: 'tool',
-        versionDigest: sha(`${scenario.prefix}/auth-test-harness/v1`),
+        versionDigest: refs.dependency.artifact.digest,
+        evidence: [evidenceRefFor(refs.dependency, ['verifies'])],
       },
     ],
     risk,
     verification: {
       verificationStepId: 'verify',
       verifier: human ? 'human' : 'test',
-      verifierDigest: sha(`${scenario.prefix}/procedure-verifier/v1`),
+      verifierDigest: refs.verifier.artifact.digest,
+      evidence: [evidenceRefFor(refs.verifier, ['verifies'])],
       successCriteria: ['all bounded authentication tests pass'],
       failureCriteria: ['any bounded authentication test fails'],
       timeoutMs: 30_000,
@@ -356,11 +370,18 @@ function procedureInput(scenario, refs, options = {}) {
           instructions: 'Restore the reviewed prior state under human control.',
           evidence: [evidenceRefFor(refs.rollback, ['supports'])],
         }
-      : {
-          strategy: 'disable-candidate',
-          instructions: 'Disable the candidate and preserve the prior state.',
-          evidence: [evidenceRefFor(refs.rollback, ['supports'])],
-        },
+      : mutative
+        ? {
+            strategy: 'restore-checkpoint',
+            instructions: 'Restore the exact pre-canary checkpoint.',
+            evidence: [evidenceRefFor(refs.checkpoint, ['verifies'])],
+            checkpointDigest: refs.checkpoint.artifact.digest,
+          }
+        : {
+            strategy: 'disable-candidate',
+            instructions: 'Disable the candidate and preserve the prior state.',
+            evidence: [evidenceRefFor(refs.rollback, ['supports'])],
+          },
     canonicalFingerprint: fingerprintMemoryEvents(scenario.events()),
     actor: 'procedure-controller',
     recordedAt: scenario.time + 1,
@@ -378,10 +399,14 @@ function setup(prefix, options = {}) {
     procedureInput(scenario, refs, options),
   );
   const planEvidence = {
-    runtime: scenario.capture('canary-runtime', 'canary-runtime-origin', {
-      kind: 'test-result',
-      authority: 'tool-verified',
-    }),
+    runtime: {
+      scheduler: scenario.capture('canary-runtime-scheduler', 'canary-runtime-scheduler-origin', { kind: 'tool-result', authority: 'tool-verified' }),
+      harness: scenario.capture('canary-runtime-harness', 'canary-runtime-harness-origin', { kind: 'tool-result', authority: 'tool-verified' }),
+      observer: scenario.capture('canary-runtime-observer', 'canary-runtime-observer-origin', { kind: 'tool-result', authority: 'tool-verified' }),
+      verifier: scenario.capture('canary-runtime-verifier', 'canary-runtime-verifier-origin', { kind: 'test-result', authority: 'tool-verified' }),
+      rollbackController: scenario.capture('canary-runtime-rollback', 'canary-runtime-rollback-origin', { kind: 'tool-result', authority: 'tool-verified' }),
+      environment: scenario.capture('canary-runtime-environment', 'canary-runtime-environment-origin', { kind: 'environment-transition', authority: 'tool-verified' }),
+    },
     quality: scenario.capture('canary-quality', 'canary-quality-origin', {
       kind: 'document',
       authority: 'external-source',
@@ -496,13 +521,20 @@ function planInput(scenario, candidate, refs, options = {}) {
       maxRetriesPerSubject: 0,
     },
     runtime: {
-      schedulerDigest: sha(`${scenario.prefix}/scheduler/v1`),
-      harnessDigest: sha(`${scenario.prefix}/canary-harness/v1`),
-      observerDigest: sha(`${scenario.prefix}/observer/v1`),
-      verifierDigest: sha(`${scenario.prefix}/canary-verifier/v1`),
-      rollbackControllerDigest: sha(`${scenario.prefix}/rollback-controller/v1`),
-      environmentDigest: sha(`${scenario.prefix}/environment/v1`),
-      evidence: [evidenceRefFor(refs.runtime, ['verifies'])],
+      schedulerDigest: refs.runtime.scheduler.artifact.digest,
+      harnessDigest: refs.runtime.harness.artifact.digest,
+      observerDigest: refs.runtime.observer.artifact.digest,
+      verifierDigest: refs.runtime.verifier.artifact.digest,
+      rollbackControllerDigest: refs.runtime.rollbackController.artifact.digest,
+      environmentDigest: refs.runtime.environment.artifact.digest,
+      evidence: [
+        evidenceRefFor(refs.runtime.scheduler, ['verifies']),
+        evidenceRefFor(refs.runtime.harness, ['verifies']),
+        evidenceRefFor(refs.runtime.observer, ['verifies']),
+        evidenceRefFor(refs.runtime.verifier, ['verifies']),
+        evidenceRefFor(refs.runtime.rollbackController, ['verifies']),
+        evidenceRefFor(refs.runtime.environment, ['verifies']),
+      ],
     },
     stopConditions: options.stopConditions ?? stopConditions(refs, options),
     abort: {
@@ -529,6 +561,10 @@ test('a bounded plan deterministically creates non-empty treatment and control a
   assert.equal(plan.procedurePromotionAuthorized, false);
   assert.equal(plan.executionAuthorized, false);
   assert.equal(plan.candidateDigest, candidate.candidateDigest);
+  assert.equal(plan.canonicalFingerprint, fingerprintMemoryEvents(scenario.events()));
+  assert.equal(plan.canonicalEventCount, scenario.events().length);
+  assert.deepEqual(plan.inheritedSourceEvidenceIds, candidate.sourceEvidenceIds);
+  assert.equal(plan.planSourceEvidenceIds.length > 0, true);
   assert.equal(isIssuedBoundedCanaryPlan(plan), true);
 });
 
@@ -706,14 +742,14 @@ test('stale history, restricted evidence, and secret evidence fail closed', () =
   );
 
   const restricted = setup('restricted-plan');
-  const recordedAt = restricted.scenario.time + 1;
+  const recordedAt = restricted.scenario.time + 3;
   restricted.scenario.kernel.setEvidenceAvailability(
     {
       eventId: 'restricted-plan/restrict-runtime',
       recordedAt: restricted.scenario.time + 2,
       actor: 'privacy-controller',
     },
-    restricted.planEvidence.runtime.id,
+    restricted.planEvidence.runtime.scheduler.id,
     'restricted',
     'runtime evidence is no longer authorized',
   );
@@ -729,7 +765,7 @@ test('stale history, restricted evidence, and secret evidence fail closed', () =
         recordedAt,
         canonicalFingerprint: fingerprintMemoryEvents(restricted.scenario.events()),
       }),
-    /not currently available/,
+    /was unavailable or forged at plan time/,
   );
 
   const secret = setup('secret-plan');
@@ -770,7 +806,7 @@ test('independent review is advisory and cannot reuse plan source families', () 
         planId: plan.id,
         decision: 'approve',
         findings: [],
-        evidence: [evidenceRefFor(planEvidence.runtime, ['verifies'])],
+        evidence: [evidenceRefFor(planEvidence.runtime.scheduler, ['verifies'])],
         canonicalFingerprint: fingerprintMemoryEvents(scenario.events()),
         reviewer: plan.actor,
         recordedAt: scenario.time + 1,
@@ -785,7 +821,7 @@ test('independent review is advisory and cannot reuse plan source families', () 
         planId: plan.id,
         decision: 'approve',
         findings: [],
-        evidence: [evidenceRefFor(planEvidence.runtime, ['verifies'])],
+        evidence: [evidenceRefFor(planEvidence.runtime.scheduler, ['verifies'])],
         canonicalFingerprint: fingerprintMemoryEvents(scenario.events()),
         reviewer: 'independent-reviewer',
         recordedAt: scenario.time + 1,
@@ -812,6 +848,7 @@ test('independent review is advisory and cannot reuse plan source families', () 
   assert.equal(review.hostSchedulingAuthorized, false);
   assert.equal(review.procedurePromotionAuthorized, false);
   assert.equal(review.executionAuthorized, false);
+  assert.equal(review.canonicalEventCount, scenario.events().length);
   assert.equal(isIssuedCanaryPlanReview(review), true);
 });
 
@@ -874,6 +911,129 @@ test('sparse, circular, and non-canonical inputs fail before planning', () => {
         ...input,
         budget: { ...input.budget, maxCostMicros: -0 },
       }),
-    /canonical number/,
+    /finite JSON numbers/,
+  );
+});
+
+
+test('runtime component digests require exact digest-matching verifier evidence', () => {
+  const { scenario, candidate, planEvidence } = setup('runtime-digest-binding');
+  const input = planInput(scenario, candidate, planEvidence);
+  assert.throws(
+    () =>
+      createBoundedCanaryPlan(scenario.events(), candidate, {
+        ...input,
+        runtime: {
+          ...input.runtime,
+          schedulerDigest: sha('unrelated-scheduler-build'),
+        },
+      }),
+    /runtime scheduler digest requires exact verifies evidence/,
+  );
+});
+
+test('candidate and plan canonical prefixes cannot be transplanted across forks', () => {
+  const { scenario, candidate, planEvidence } = setup('canonical-prefix');
+  const forkedEvents = structuredClone(scenario.events());
+  forkedEvents[0] = { ...forkedEvents[0], actor: 'forked-recorder' };
+  const input = planInput(scenario, candidate, planEvidence);
+  assert.throws(
+    () =>
+      createBoundedCanaryPlan(forkedEvents, candidate, {
+        ...input,
+        canonicalFingerprint: fingerprintMemoryEvents(forkedEvents),
+      }),
+    /procedure candidate canonical prefix is stale, truncated, or forked/,
+  );
+
+  const plan = createBoundedCanaryPlan(scenario.events(), candidate, input);
+  const independent = scenario.capture('fork-review', 'fork-review-origin', {
+    kind: 'human-feedback',
+    authority: 'human-explicit',
+  });
+  const reviewFork = structuredClone(scenario.events());
+  reviewFork[0] = { ...reviewFork[0], actor: 'second-fork-recorder' };
+  assert.throws(
+    () =>
+      reviewBoundedCanaryPlan(reviewFork, plan, {
+        id: 'canonical-prefix/review',
+        planId: plan.id,
+        decision: 'approve',
+        findings: [],
+        evidence: [evidenceRefFor(independent, ['verifies'])],
+        canonicalFingerprint: fingerprintMemoryEvents(reviewFork),
+        reviewer: 'independent-reviewer',
+        recordedAt: scenario.time + 1,
+      }),
+    /canary plan canonical prefix is stale, truncated, or forked/,
+  );
+});
+
+test('candidate and plan evidence must remain currently available', () => {
+  const candidateFixture = setup('candidate-current-evidence');
+  candidateFixture.scenario.kernel.setEvidenceAvailability(
+    {
+      eventId: 'candidate-current-evidence/restrict-source',
+      recordedAt: candidateFixture.scenario.time + 1,
+      actor: 'privacy-controller',
+    },
+    candidateFixture.candidate.sourceEvidenceIds[0],
+    'restricted',
+    'candidate evidence is no longer authorized',
+  );
+  candidateFixture.scenario.time += 2;
+  assert.throws(
+    () =>
+      createBoundedCanaryPlan(
+        candidateFixture.scenario.events(),
+        candidateFixture.candidate,
+        planInput(
+          candidateFixture.scenario,
+          candidateFixture.candidate,
+          candidateFixture.planEvidence,
+        ),
+      ),
+    /procedure candidate evidence is not currently available/,
+  );
+
+  const reviewFixture = setup('plan-current-evidence');
+  const plan = createBoundedCanaryPlan(
+    reviewFixture.scenario.events(),
+    reviewFixture.candidate,
+    planInput(
+      reviewFixture.scenario,
+      reviewFixture.candidate,
+      reviewFixture.planEvidence,
+    ),
+  );
+  const independent = reviewFixture.scenario.capture(
+    'current-evidence-review',
+    'current-evidence-review-origin',
+    { kind: 'human-feedback', authority: 'human-explicit' },
+  );
+  reviewFixture.scenario.kernel.setEvidenceAvailability(
+    {
+      eventId: 'plan-current-evidence/restrict-source',
+      recordedAt: reviewFixture.scenario.time + 1,
+      actor: 'privacy-controller',
+    },
+    plan.planSourceEvidenceIds[0],
+    'restricted',
+    'plan evidence is no longer authorized',
+  );
+  reviewFixture.scenario.time += 2;
+  assert.throws(
+    () =>
+      reviewBoundedCanaryPlan(reviewFixture.scenario.events(), plan, {
+        id: 'plan-current-evidence/review',
+        planId: plan.id,
+        decision: 'approve',
+        findings: [],
+        evidence: [evidenceRefFor(independent, ['verifies'])],
+        canonicalFingerprint: fingerprintMemoryEvents(reviewFixture.scenario.events()),
+        reviewer: 'independent-reviewer',
+        recordedAt: reviewFixture.scenario.time + 1,
+      }),
+    /canary plan evidence is not currently available/,
   );
 });

@@ -221,6 +221,7 @@ export interface VerifiedProcedureCandidate {
   readonly rollback: ProcedureRollbackContract;
   readonly applicability: VerifiedApplicabilityBinding;
   readonly canonicalFingerprint: string;
+  readonly canonicalEventCount: number;
   readonly sourceEvidenceIds: readonly string[];
   readonly sourceGroups: readonly string[];
   readonly authorities: readonly Authority[];
@@ -999,6 +1000,7 @@ export function createVerifiedProcedureCandidate(
     rollback,
     applicability: applicabilityBindingValue,
     canonicalFingerprint,
+    canonicalEventCount: events.length,
     sourceEvidenceIds,
     sourceGroups,
     authorities,

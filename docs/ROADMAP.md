@@ -95,12 +95,12 @@ Exit gate: strong current-state, historical-state, premise-resistance, and conta
 - [x] full discovery/held-out applicability lineage preserved inside the candidate without granting promotion or execution authority;
 - [ ] procedure-specific counterexample search beyond inherited applicability evidence;
 - [ ] contextual success/failure models beyond bounded conjunction rules;
-- [ ] bounded non-executable canary plans with exact rollout-intent approval;
+- [x] bounded non-executable canary plans with deterministic treatment/control assignment, exact canonical-prefix lineage, evidence-bound runtime identities, coherent budgets, safety/security stopping, rollback coverage, independent advisory review, and no scheduling or execution authority;
 - [ ] complete canary trial registry, monotonic resource meter, and fail-safe reducer;
 - [ ] procedure mixtures and conflict router;
 - [ ] staged promotion, deprecation, supersession, revocation, and rollback.
 
-Next gate: `verified-canary-plans-v1`. An exact procedure-candidate digest must remain non-executable while population, deterministic treatment/control assignment, budgets, sandbox/network/tool policy, stop rules, rollback coverage, verifier identity, independent review, and rollout-intent digest are bound into a bounded plan.
+Next gate: `canonical-canary-trials-v1`. An exact reviewed plan must remain non-executable while canonical assignment receipts, monotonic resource meters, complete trial registration, verified outcome receipts, stop-condition evaluation, rollback evidence, and a fail-safe reducer are bound without granting automatic procedure promotion.
 
 Exit gate: lower same-error recurrence and positive transfer on held-out tasks without increased negative transfer.
 
