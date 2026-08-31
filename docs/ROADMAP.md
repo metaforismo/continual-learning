@@ -55,7 +55,7 @@ Exit gate: state and retrieval correctness remain stable while the dataset grows
 - competition, inhibition, diversity, and source-family collapse;
 - hierarchical anchors and on-demand evidence expansion;
 - token-aware packet compiler for multiple model templates;
-- retrieval/use traces and non-selection reasons;
+- [x] typed retrieval/use traces with non-selection reasons at the experience-attribution boundary;
 - synthetic million-event scale tests.
 
 Exit gate: bounded p95 read/context cost and no material degradation on controlled interference suites.
@@ -79,10 +79,13 @@ Exit gate: strong current-state, historical-state, premise-resistance, and conta
 
 ## Phase 4 — Experience and procedural learning
 
-- [ ] `experience-attribution-v1`: typed activation/materialization/consultation/application traces;
-- [ ] separate correlational trajectory evidence from paired causal intervention evidence;
-- [ ] verifier-bound treatment/control identity and experimental-unit checks;
-- [ ] conservative positive/negative/mixed/neutral/insufficient utility assessment;
+- [x] `experience-attribution-v1`: typed activation/materialization/consultation/application traces;
+- [x] separate correlational trajectory evidence from paired causal intervention evidence;
+- [x] verifier-bound treatment/control identity and experimental-unit checks;
+- [x] order-independent source-family collapse and explicit conflicting-unit/family handling;
+- [x] conservative positive/negative/mixed/neutral/insufficient utility assessment;
+- [ ] durable authenticated recorder/controller identities and restart-safe attribution admission;
+- [ ] randomized assignment and complete experiment registry preventing selective trial omission;
 - [ ] contextual applicability hypotheses with required and forbidden features;
 - [ ] discovery/held-out validation separation;
 - [ ] candidate procedure induction with step-level canonical evidence;
@@ -90,6 +93,8 @@ Exit gate: strong current-state, historical-state, premise-resistance, and conta
 - [ ] contextual success/failure models;
 - [ ] procedure mixtures and conflict router;
 - [ ] staged promotion, canary use, deprecation, and rollback.
+
+Next gate: `contextual-applicability-hypotheses-v1`. Positive or negative utility must remain scoped to observed contexts until required/forbidden features are discovered and validated on held-out experimental units.
 
 Exit gate: lower same-error recurrence and positive transfer on held-out tasks without increased negative transfer.
 
