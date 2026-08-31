@@ -1,5 +1,7 @@
 import {
   induceApplicabilityHypothesis as induceApplicabilityHypothesisCore,
+  isIssuedApplicabilityHypothesisCandidate as isIssuedCandidateCore,
+  isIssuedApplicabilityObservation as isIssuedObservationCore,
   validateApplicabilityHypothesis as validateApplicabilityHypothesisCore,
   type ApplicabilityHypothesisCandidate,
   type ApplicabilityHypothesisInput,
@@ -7,6 +9,7 @@ import {
   type VerifiedApplicabilityHypothesis,
   type VerifiedApplicabilityObservation,
 } from './applicability-hypotheses.js';
+import { canonicalJson } from '../retrieval/canonical.js';
 
 export {
   APPLICABILITY_HYPOTHESES_SCHEMA_VERSION,
@@ -35,21 +38,48 @@ export type {
 } from './applicability-hypotheses.js';
 
 const MAX_OBSERVATIONS = 4_096;
+const MAX_INPUT_CHARACTERS = 1_000_000;
 
-function snapshotArray<T>(values: readonly T[], label: string): readonly T[] {
+function deepFreeze<T>(value: T): T {
+  if (value !== null && typeof value === 'object' && !Object.isFrozen(value)) {
+    for (const child of Object.values(value as unknown as Record<string, unknown>)) {
+      deepFreeze(child);
+    }
+    Object.freeze(value);
+  }
+  return value;
+}
+
+function canonicalSnapshot<T>(value: T, label: string): T {
+  const encoded = canonicalJson(value);
+  if (encoded.length > MAX_INPUT_CHARACTERS) {
+    throw new RangeError(`${label} cannot exceed ${MAX_INPUT_CHARACTERS} canonical characters`);
+  }
+  return deepFreeze(JSON.parse(encoded) as T);
+}
+
+function snapshotObservations(
+  values: readonly VerifiedApplicabilityObservation[],
+  label: string,
+): readonly VerifiedApplicabilityObservation[] {
   if (!Array.isArray(values)) throw new TypeError(`${label} must be an array`);
   if (values.length > MAX_OBSERVATIONS) {
     throw new RangeError(`${label} cannot exceed ${MAX_OBSERVATIONS} entries`);
   }
-  return Object.freeze(Array.from(values));
+  const snapshot = Object.freeze(Array.from(values));
+  for (const observation of snapshot) {
+    if (!isIssuedObservationCore(observation)) {
+      throw new Error(`${label} requires issued observation capabilities`);
+    }
+  }
+  return snapshot;
 }
 
 function selectedForManifestCheck(
-  observationsInput: readonly VerifiedApplicabilityObservation[],
+  observations: readonly VerifiedApplicabilityObservation[],
   idsInput: readonly string[],
   label: string,
 ): readonly VerifiedApplicabilityObservation[] {
-  const observations = snapshotArray(observationsInput, `${label} observations`);
   if (!Array.isArray(idsInput)) throw new TypeError(`${label} observation ids must be an array`);
   const ids = Object.freeze(Array.from(idsInput));
   const selected: VerifiedApplicabilityObservation[] = [];
@@ -88,31 +118,38 @@ function assertConsistentFeatureManifests(
   }
 }
 
-/** Public induction boundary with a fail-closed feature-manifest consistency gate. */
+/** Public induction boundary with single-read inputs and feature-manifest consistency. */
 export function induceApplicabilityHypothesis(
   observationsInput: readonly VerifiedApplicabilityObservation[],
   requestInput: ApplicabilityHypothesisInput,
 ): ApplicabilityHypothesisCandidate {
+  const observations = snapshotObservations(observationsInput, 'discovery observations');
+  const request = canonicalSnapshot(requestInput, 'applicability hypothesis request');
   const selected = selectedForManifestCheck(
-    observationsInput,
-    requestInput.discoveryObservationIds,
+    observations,
+    request.discoveryObservationIds,
     'discovery',
   );
   assertConsistentFeatureManifests(selected, 'discovery');
-  return induceApplicabilityHypothesisCore(observationsInput, requestInput);
+  return induceApplicabilityHypothesisCore(observations, request);
 }
 
-/** Public held-out validation boundary with the same manifest consistency gate. */
+/** Public held-out validation boundary with the same fail-closed input contract. */
 export function validateApplicabilityHypothesis(
   candidate: ApplicabilityHypothesisCandidate,
   observationsInput: readonly VerifiedApplicabilityObservation[],
   requestInput: ApplicabilityValidationInput,
 ): VerifiedApplicabilityHypothesis {
+  if (!isIssuedCandidateCore(candidate)) {
+    throw new Error('applicability validation requires an issued hypothesis candidate');
+  }
+  const observations = snapshotObservations(observationsInput, 'validation observations');
+  const request = canonicalSnapshot(requestInput, 'applicability validation request');
   const selected = selectedForManifestCheck(
-    observationsInput,
-    requestInput.validationObservationIds,
+    observations,
+    request.validationObservationIds,
     'validation',
   );
   assertConsistentFeatureManifests(selected, 'validation');
-  return validateApplicabilityHypothesisCore(candidate, observationsInput, requestInput);
+  return validateApplicabilityHypothesisCore(candidate, observations, request);
 }
