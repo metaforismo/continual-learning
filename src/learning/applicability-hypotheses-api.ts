@@ -64,6 +64,10 @@ const issuedValidationsById = new Map<
   string,
   IssuedIdentity<VerifiedApplicabilityHypothesis>
 >();
+const candidateDiscoveryContextManifests = new WeakMap<
+  object,
+  ReadonlyMap<string, string>
+>();
 
 function deepFreeze<T>(value: T): T {
   if (value !== null && typeof value === 'object' && !Object.isFrozen(value)) {
@@ -159,25 +163,45 @@ function selectedForManifestCheck(
   return Object.freeze(selected);
 }
 
+function contextManifestMap(
+  observations: readonly VerifiedApplicabilityObservation[],
+  label: string,
+): ReadonlyMap<string, string> {
+  const manifests = new Map<string, string>();
+  for (const observation of observations) {
+    const previous = manifests.get(observation.contextFingerprint);
+    if (previous !== undefined && previous !== observation.featureSetDigest) {
+      throw new Error(`${label} assigns different feature manifests to one context fingerprint`);
+    }
+    manifests.set(observation.contextFingerprint, observation.featureSetDigest);
+  }
+  return manifests;
+}
+
+function sameManifestMaps(
+  left: ReadonlyMap<string, string>,
+  right: ReadonlyMap<string, string>,
+): boolean {
+  if (left.size !== right.size) return false;
+  for (const [contextFingerprint, featureSetDigest] of left) {
+    if (right.get(contextFingerprint) !== featureSetDigest) return false;
+  }
+  return true;
+}
+
 function assertConsistentFeatureManifests(
   observations: readonly VerifiedApplicabilityObservation[],
   label: string,
 ): void {
   const byExperimentalUnit = new Map<string, string>();
-  const byContextFingerprint = new Map<string, string>();
   for (const observation of observations) {
     const unitManifest = byExperimentalUnit.get(observation.experimentalUnitDigest);
     if (unitManifest !== undefined && unitManifest !== observation.featureSetDigest) {
       throw new Error(`${label} assigns different feature manifests to one experimental unit`);
     }
     byExperimentalUnit.set(observation.experimentalUnitDigest, observation.featureSetDigest);
-
-    const contextManifest = byContextFingerprint.get(observation.contextFingerprint);
-    if (contextManifest !== undefined && contextManifest !== observation.featureSetDigest) {
-      throw new Error(`${label} assigns different feature manifests to one context fingerprint`);
-    }
-    byContextFingerprint.set(observation.contextFingerprint, observation.featureSetDigest);
   }
+  contextManifestMap(observations, label);
 }
 
 /** Public observation boundary with single-read inputs and conflict-safe idempotency. */
@@ -214,14 +238,29 @@ export function induceApplicabilityHypothesis(
     'discovery',
   );
   assertConsistentFeatureManifests(selected, 'discovery');
+  const discoveryContextManifests = contextManifestMap(selected, 'discovery');
   const candidate = induceApplicabilityHypothesisCore(observations, request);
-  return bindIdentity(
+  const issuedCandidate = bindIdentity(
     candidate.id,
     candidate.candidateDigest,
     candidate,
     issuedCandidatesById,
     'applicability hypothesis id',
   );
+  const previousManifests = candidateDiscoveryContextManifests.get(issuedCandidate as object);
+  if (
+    previousManifests !== undefined &&
+    !sameManifestMaps(previousManifests, discoveryContextManifests)
+  ) {
+    throw new Error('applicability hypothesis retry changed its discovery context manifests');
+  }
+  if (previousManifests === undefined) {
+    candidateDiscoveryContextManifests.set(
+      issuedCandidate as object,
+      discoveryContextManifests,
+    );
+  }
+  return issuedCandidate;
 }
 
 /** Public held-out validation boundary with the same fail-closed input contract. */
@@ -233,6 +272,12 @@ export function validateApplicabilityHypothesis(
   if (!isIssuedCandidateCore(candidate)) {
     throw new Error('applicability validation requires an issued hypothesis candidate');
   }
+  const discoveryContextManifests = candidateDiscoveryContextManifests.get(candidate as object);
+  if (discoveryContextManifests === undefined) {
+    throw new Error(
+      'applicability validation requires a candidate issued by the guarded public boundary',
+    );
+  }
   const observations = snapshotObservations(observationsInput, 'validation observations');
   const request = canonicalSnapshot(requestInput, 'applicability validation request');
   assertIdentifier(request.id, 'applicability validation id');
@@ -242,6 +287,19 @@ export function validateApplicabilityHypothesis(
     'validation',
   );
   assertConsistentFeatureManifests(selected, 'validation');
+  for (const observation of selected) {
+    const discoveryFeatureSetDigest = discoveryContextManifests.get(
+      observation.contextFingerprint,
+    );
+    if (
+      discoveryFeatureSetDigest !== undefined &&
+      discoveryFeatureSetDigest !== observation.featureSetDigest
+    ) {
+      throw new Error(
+        'validation rewrites the feature manifest of a discovery context fingerprint',
+      );
+    }
+  }
   const validation = validateApplicabilityHypothesisCore(candidate, observations, request);
   return bindIdentity(
     validation.id,
