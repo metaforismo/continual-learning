@@ -198,7 +198,7 @@ test('unissued observations are rejected before any forged property getter is re
         actor: 'hypothesis-controller',
         recordedAt: 1,
       }),
-    /issued observation capabilities/,
+    /issued observation capability/,
   );
   assert.equal(idReads, 0);
 });
@@ -244,7 +244,7 @@ test('public request and observation arrays are snapshotted exactly once', () =>
         actor: 'hypothesis-controller',
         recordedAt: 1,
       }),
-    /issued observation capabilities/,
+    /issued observation capability/,
   );
   assert.equal(arrayReads, 1);
 });
