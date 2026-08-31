@@ -86,15 +86,17 @@ Exit gate: strong current-state, historical-state, premise-resistance, and conta
 - [x] conservative positive/negative/mixed/neutral/insufficient utility assessment;
 - [ ] durable authenticated recorder/controller identities and restart-safe attribution admission;
 - [ ] randomized assignment and complete experiment registry preventing selective trial omission;
-- [ ] contextual applicability hypotheses with required and forbidden features;
-- [ ] discovery/held-out validation separation;
+- [x] contextual applicability hypotheses with required and forbidden features;
+- [x] pre-trial feature-schema binding and consistent unit/context manifests;
+- [x] discovery/held-out validation separation with comparison, unit, and source-family non-overlap;
+- [x] precision, recall, specificity, counterexample activation, and mean-effect validation gates;
 - [ ] candidate procedure induction with step-level canonical evidence;
-- [ ] counterexample search and independent evidence grouping;
-- [ ] contextual success/failure models;
+- [ ] counterexample search and independent evidence grouping for procedure steps;
+- [ ] contextual success/failure models beyond bounded conjunction rules;
 - [ ] procedure mixtures and conflict router;
 - [ ] staged promotion, canary use, deprecation, and rollback.
 
-Next gate: `contextual-applicability-hypotheses-v1`. Positive or negative utility must remain scoped to observed contexts until required/forbidden features are discovered and validated on held-out experimental units.
+Next gate: `verified-procedure-candidates-v1`. A validated applicability rule must remain non-executable until ordered steps, dependencies, contraindications, risk, verification, rollback, and exact step-level canonical evidence are bound into an immutable candidate.
 
 Exit gate: lower same-error recurrence and positive transfer on held-out tasks without increased negative transfer.
 
