@@ -20,6 +20,11 @@ The project treats the following as first-class threats:
 - post-outcome context features leaking treatment success into applicability discovery;
 - discovery trials reappearing in held-out validation through copied ids, units, or source families;
 - context-feature strings exposing sensitive project, user, or tenant state;
+- generic or constraints-only evidence being laundered into step-level procedure support;
+- caller-chosen digests masquerading as attested dependency, verifier, or rollback identities;
+- a policy/tool artifact masquerading as human verification;
+- mutating procedure candidates underdeclaring risk or claiming disable-only rollback;
+- evidence-backed procedure candidates being mistaken for scheduling or execution authority;
 - concurrent write anomalies and replay inconsistency;
 - consumer bootstrap that silently skips canonical history;
 - projection code advancing offsets without the corresponding derived-state mutation;
@@ -94,6 +99,39 @@ The applicability boundary requires one feature-schema digest, timestamps the ma
 
 Applicability observations, candidates, and validations are process-local capabilities in v1. A validated rule remains non-canonical learning evidence and explicitly carries no procedure-promotion or execution authority. Durable storage, signatures, schema migration, deletion propagation, and authenticated feature instrumentation remain future boundaries.
 
+### Verified procedure-candidate boundary
+
+A verified procedure candidate is still data, not an instruction capability. The boundary accepts
+only an exact issued held-out applicability validation, preserves both discovery and validation
+lineage, binds to the current canonical fingerprint, and requires every goal and ordered step to
+carry positive canonical support. One generic citation cannot serve as the sole evidence anchor for
+every step. Context-only, contradicting, constraints-only, cross-scope, unavailable, and secret
+evidence cannot be laundered into positive procedure support.
+
+Dependency versions, verifier identities, and restore checkpoints are accepted only when exact
+`verifies` evidence has the same content hash as the declared digest and sufficient authority. A
+human verifier specifically requires digest-matching `human-explicit` evidence; a system-policy
+label does not become human review merely because it ranks highly. Contraindications retain
+constraining or verifying evidence as first-class negative knowledge.
+
+Mutating candidates cannot declare low risk and cannot claim that disabling future use reverses an
+external change. High and destructive candidates require human verification and review-oriented
+failure handling, but even a compliant candidate remains:
+
+```text
+status = candidate
+executable = false
+procedurePromotionAuthorized = false
+canaryPlanAuthorized = false
+executionAuthorized = false
+```
+
+Candidate issuance and ID/version conflict protection are process-local capabilities, not signatures
+or durable authorization. The module semantically replays the supplied history and trusts the host
+to provide the real canonical prefix and authentic evidence bytes. It does not schedule canaries,
+execute instructions, attest tools or humans, or propagate deletion into a durable candidate store.
+Those remain separate future boundaries.
+
 ### Reversible learning
 
 Procedures, controller versions, adapters, and context policies must support suppression and rollback.
@@ -109,6 +147,7 @@ Procedures, controller versions, adapters, and context policies must support sup
 - export and provenance inspection;
 - prompt-injection/taint and transition-verifier red-team evaluation;
 - applicability-feature schema review and sensitive-feature filtering;
+- procedure-candidate provenance, contraindication, risk, rollback, and exact-digest review;
 - backup and disaster-recovery process;
 - dependency and supply-chain review;
 - incident response contacts.

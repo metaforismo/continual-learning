@@ -9,7 +9,8 @@ Every end-to-end error should be localized to one of these boundaries:
 ```text
 capture -> write/admission -> state projection -> retrieval/activation
         -> selected canonical rehydration -> context compilation
-        -> decision/use -> action -> outcome -> learning update
+        -> decision/use -> action -> verified outcome
+        -> attribution -> applicability -> procedure candidate -> later canary/lifecycle
 ```
 
 Report both final task accuracy and intermediate diagnostics.
@@ -95,6 +96,13 @@ Report both final task accuracy and intermediate diagnostics.
 - applicability precision and recall;
 - contraindication recall;
 - cross-context validation;
+- full discovery/held-out lineage preservation;
+- step-local versus generic evidence laundering;
+- dependency, verifier, and checkpoint digest binding;
+- verification dependency-closure coverage;
+- risk and rollback under-declaration;
+- immutable candidate ID/version conflict handling;
+- explicit absence of promotion, canary, scheduling, and execution authority;
 - procedure collision;
 - negative transfer;
 - degradation after repeated consolidation.
@@ -159,6 +167,9 @@ context utilization
 transition omission/corruption/hallucination
 error recurrence rate
 applicability precision/recall
+procedure step evidence coverage
+procedure contraindication coverage
+procedure candidate conflict/rejection rate
 retention and backward transfer
 next-task learning rate
 p50/p95/p99 latency
@@ -185,6 +196,56 @@ outcome(with alternative memory)
 
 Use paired tasks, deterministic verifiers, and replayable environments. Report confidence intervals and the number of independent source groups.
 
+## Verified procedure-candidate evaluation
+
+Evaluate the candidate boundary independently from applicability discovery and independently from
+future canary execution. A correct candidate test does not need to execute any instruction.
+
+### Positive construction
+
+Construct a candidate from a real process-issued validated applicability capability and canonical
+evidence. Verify that the resulting object preserves:
+
+- exact discovery and held-out observation, comparison, unit, source-family, metric, and digest lineage;
+- required and forbidden feature rules;
+- semantic step order and canonicalized unordered sets;
+- step-exclusive supportive evidence anchors;
+- evidence-bound dependency versions, verifier implementation, and restore checkpoint;
+- evidence-backed contraindications;
+- risk, verification, and rollback contracts;
+- immutable candidate and procedure-version identity;
+- `executable = false` and every authority flag set to false.
+
+### Adversarial matrix
+
+Reject or classify explicitly:
+
+- cloned upstream capabilities and stateful property getters;
+- stale fingerprints, historical backdating, sparse arrays, circular JSON, and oversized requests;
+- unavailable, restricted, deleted, cross-scope, context-only, contradicting, constraints-only, or secret evidence;
+- generic evidence copied onto all steps;
+- forward step dependencies and a final verifier that omits prior steps;
+- dependency/verifier/checkpoint digests without exact digest-matching authoritative evidence;
+- a human verifier backed only by policy or tool evidence;
+- overlapping success/failure criteria;
+- low-risk mutation and disable-only rollback;
+- conflicting candidate IDs or immutable procedure versions;
+- any implicit promotion, canary planning, host scheduling, or execution authority.
+
+### Determinism and retry
+
+Permute every semantically unordered input collection while retaining exact step order. Candidate
+bytes and digest must remain identical. Exact retries must return the same issued capability; a
+failed identity/version conflict must not reserve either registry key.
+
+### Allowed claim
+
+Until durable admission and real canary trials exist, the allowed claim is limited to:
+
+> The kernel constructs an immutable, evidence-bound, non-executable procedure candidate from an
+> issued held-out applicability result and rejects the documented provenance, identity, risk, and
+> authority violations in deterministic tests.
+
 ## Evidence ladder
 
 ### Level 0 — specification
@@ -193,7 +254,7 @@ Architecture, invariants, threat model, and tests over hand-built cases. No capa
 
 ### Level 1 — deterministic kernel
 
-Replay, evidence, bitemporal state, adjudication, transition verification, quarantine, activation, compilation, procedure-promotion, change-feed delivery, and selected-object-read invariants pass locally and in CI.
+Replay, evidence, bitemporal state, adjudication, transition verification, quarantine, activation, compilation, conservative attribution, held-out applicability, non-executable procedure-candidate, change-feed delivery, and selected-object-read invariants pass locally and in CI.
 
 Allowed claim: "the kernel enforces these tested contracts."
 

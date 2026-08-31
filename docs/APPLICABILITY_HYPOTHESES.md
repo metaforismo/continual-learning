@@ -399,15 +399,13 @@ validation:           O(P * clauses)
 
 V1 is designed for bounded experimental datasets, not unrestricted feature mining over lifetime history.
 
-## Next gate
+## Downstream boundary
 
-`verified-procedure-candidates-v1` must require:
+`verified-procedure-candidates-v1` consumes only an exact issued, blocker-free validated
+applicability capability. It preserves the complete discovery and held-out lineage while binding
+ordered typed steps, evidence-attested dependencies, contraindications, risk, verifier identity,
+and rollback into an immutable non-executable candidate. See
+[Verified procedure candidates](VERIFIED_PROCEDURE_CANDIDATES.md).
 
-- validated applicability;
-- ordered typed steps;
-- exact step-level canonical evidence;
-- dependencies and contraindications;
-- risk and verification contracts;
-- rollback behavior;
-- immutable candidate identity;
-- `executable = false`.
+The next gate after that candidate is `verified-canary-plans-v1`; applicability validation alone
+still grants no canary, scheduling, promotion, or execution authority.
