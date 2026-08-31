@@ -360,3 +360,64 @@ test('same applicability ids are exact-retry idempotent and reject conflicting c
     /conflicts with an already issued identity/,
   );
 });
+
+test('held-out validation cannot rewrite a reused discovery context manifest', () => {
+  const scenario = new Scenario();
+  const sharedContext = 'context/shared-manifest';
+  const discoveryFixture = pairFixture(
+    scenario,
+    'context-manifest/discovery',
+    'success',
+    'failure',
+    sharedContext,
+    'source/context-manifest/discovery',
+  );
+  const discovery = observe(
+    discoveryFixture,
+    'observation/context-manifest/discovery',
+    ['runtime:node', 'symptom:race'],
+  );
+  const candidate = induceApplicabilityHypothesis([discovery], {
+    id: 'hypothesis/context-manifest',
+    scope,
+    memoryId: 'memory/target',
+    discoveryObservationIds: [discovery.id],
+    actor: 'hypothesis-controller',
+    recordedAt: scenario.time + 1,
+    policy: {
+      minPositiveExamples: 1,
+      minCounterexamples: 1,
+      minDistinctContexts: 1,
+      minFeatureSupport: 1,
+      minDiscoveryPrecision: 0,
+      minDiscoveryRecall: 0,
+      maxDiscoveryCounterexampleActivationRate: 1,
+      minMeanActivatedEffect: 0,
+    },
+  });
+
+  const validationFixture = pairFixture(
+    scenario,
+    'context-manifest/validation',
+    'failure',
+    'success',
+    sharedContext,
+    'source/context-manifest/validation',
+  );
+  const rewritten = observe(
+    validationFixture,
+    'observation/context-manifest/validation',
+    ['runtime:python', 'symptom:race'],
+  );
+  assert.throws(
+    () =>
+      validateApplicabilityHypothesis(candidate, [rewritten], {
+        id: 'validation/context-manifest',
+        candidateId: candidate.id,
+        validationObservationIds: [rewritten.id],
+        actor: 'validation-controller',
+        recordedAt: scenario.time + 1,
+      }),
+    /rewrites the feature manifest of a discovery context fingerprint/,
+  );
+});
