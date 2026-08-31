@@ -46,9 +46,23 @@ const MAX_IDENTIFIERS = 4_096;
 const MAX_INPUT_CHARACTERS = 1_000_000;
 const MAX_IDENTIFIER_CHARACTERS = 512;
 
-const issuedObservationIds = new Set<string>();
-const issuedCandidateIds = new Set<string>();
-const issuedValidationIds = new Set<string>();
+interface IssuedIdentity<T> {
+  readonly digest: string;
+  readonly value: T;
+}
+
+const issuedObservationsById = new Map<
+  string,
+  IssuedIdentity<VerifiedApplicabilityObservation>
+>();
+const issuedCandidatesById = new Map<
+  string,
+  IssuedIdentity<ApplicabilityHypothesisCandidate>
+>();
+const issuedValidationsById = new Map<
+  string,
+  IssuedIdentity<VerifiedApplicabilityHypothesis>
+>();
 
 function deepFreeze<T>(value: T): T {
   if (value !== null && typeof value === 'object' && !Object.isFrozen(value)) {
@@ -89,7 +103,7 @@ function snapshotObservations(
   return snapshot;
 }
 
-function assertUnusedId(value: unknown, ids: Set<string>, label: string): asserts value is string {
+function assertIdentifier(value: unknown, label: string): asserts value is string {
   if (
     typeof value !== 'string' ||
     value.trim().length === 0 ||
@@ -98,7 +112,24 @@ function assertUnusedId(value: unknown, ids: Set<string>, label: string): assert
   ) {
     throw new Error(`${label} must be non-empty bounded text without U+0000`);
   }
-  if (ids.has(value)) throw new Error(`${label} is already issued: ${value}`);
+}
+
+function bindIdentity<T>(
+  id: string,
+  digest: string,
+  value: T,
+  registry: Map<string, IssuedIdentity<T>>,
+  label: string,
+): T {
+  const previous = registry.get(id);
+  if (previous === undefined) {
+    registry.set(id, Object.freeze({ digest, value }));
+    return value;
+  }
+  if (previous.digest !== digest) {
+    throw new Error(`${label} conflicts with an already issued identity: ${id}`);
+  }
+  return previous.value;
 }
 
 function selectedForManifestCheck(
@@ -143,7 +174,7 @@ function assertConsistentFeatureManifests(
   }
 }
 
-/** Public observation boundary with single-read inputs and process-local unique ids. */
+/** Public observation boundary with single-read inputs and conflict-safe idempotency. */
 export function verifyApplicabilityObservation(
   tracesInput: readonly VerifiedExperienceTrace[],
   interventionInput: MemoryInterventionInput,
@@ -152,10 +183,15 @@ export function verifyApplicabilityObservation(
   const traces = snapshotArray(tracesInput, 'applicability trial traces');
   const intervention = canonicalSnapshot(interventionInput, 'applicability intervention input');
   const input = canonicalSnapshot(observationInput, 'applicability observation input');
-  assertUnusedId(input.id, issuedObservationIds, 'applicability observation id');
+  assertIdentifier(input.id, 'applicability observation id');
   const observation = verifyApplicabilityObservationCore(traces, intervention, input);
-  issuedObservationIds.add(observation.id);
-  return observation;
+  return bindIdentity(
+    observation.id,
+    observation.observationDigest,
+    observation,
+    issuedObservationsById,
+    'applicability observation id',
+  );
 }
 
 /** Public induction boundary with single-read inputs and feature-manifest consistency. */
@@ -165,7 +201,7 @@ export function induceApplicabilityHypothesis(
 ): ApplicabilityHypothesisCandidate {
   const observations = snapshotObservations(observationsInput, 'discovery observations');
   const request = canonicalSnapshot(requestInput, 'applicability hypothesis request');
-  assertUnusedId(request.id, issuedCandidateIds, 'applicability hypothesis id');
+  assertIdentifier(request.id, 'applicability hypothesis id');
   const selected = selectedForManifestCheck(
     observations,
     request.discoveryObservationIds,
@@ -173,8 +209,13 @@ export function induceApplicabilityHypothesis(
   );
   assertConsistentFeatureManifests(selected, 'discovery');
   const candidate = induceApplicabilityHypothesisCore(observations, request);
-  issuedCandidateIds.add(candidate.id);
-  return candidate;
+  return bindIdentity(
+    candidate.id,
+    candidate.candidateDigest,
+    candidate,
+    issuedCandidatesById,
+    'applicability hypothesis id',
+  );
 }
 
 /** Public held-out validation boundary with the same fail-closed input contract. */
@@ -188,7 +229,7 @@ export function validateApplicabilityHypothesis(
   }
   const observations = snapshotObservations(observationsInput, 'validation observations');
   const request = canonicalSnapshot(requestInput, 'applicability validation request');
-  assertUnusedId(request.id, issuedValidationIds, 'applicability validation id');
+  assertIdentifier(request.id, 'applicability validation id');
   const selected = selectedForManifestCheck(
     observations,
     request.validationObservationIds,
@@ -196,6 +237,11 @@ export function validateApplicabilityHypothesis(
   );
   assertConsistentFeatureManifests(selected, 'validation');
   const validation = validateApplicabilityHypothesisCore(candidate, observations, request);
-  issuedValidationIds.add(validation.id);
-  return validation;
+  return bindIdentity(
+    validation.id,
+    validation.validationDigest,
+    validation,
+    issuedValidationsById,
+    'applicability validation id',
+  );
 }
