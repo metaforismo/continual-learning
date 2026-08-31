@@ -106,7 +106,7 @@ npm install
 npm test
 ```
 
-The test suite currently exercises 246 foundational, state, transition, durable-ledger, change-feed, consumer-transaction, lexical-projection, and selected-object-read scenarios.
+The test suite currently exercises 247 foundational, state, transition, durable-ledger, change-feed, consumer-transaction, lexical-projection, and selected-object-read scenarios.
 
 ## Documentation
 
