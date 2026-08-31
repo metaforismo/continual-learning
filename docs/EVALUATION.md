@@ -8,7 +8,8 @@ Every end-to-end error should be localized to one of these boundaries:
 
 ```text
 capture -> write/admission -> state projection -> retrieval/activation
-        -> context compilation -> decision/use -> action -> outcome -> learning update
+        -> selected canonical rehydration -> context compilation
+        -> decision/use -> action -> outcome -> learning update
 ```
 
 Report both final task accuracy and intermediate diagnostics.
@@ -54,7 +55,9 @@ Report both final task accuracy and intermediate diagnostics.
 - interference from repetitions and same-slot conflicts;
 - exhaustive multi-target retrieval;
 - activation precision, recall, and calibration;
-- fan-out and latency scaling.
+- fan-out and latency scaling;
+- address-only candidate output without accidental content authority;
+- selected canonical evidence and claim rehydration after candidate discovery.
 
 ### D. Context compilation
 
@@ -162,6 +165,10 @@ p50/p95/p99 latency
 write amplification
 model-context tokens per request
 storage/index growth
+selected-object bucket size
+selected-object proof size
+compound-read retry rate
+full audit and rebuild time
 ```
 
 ## Causal memory utility
@@ -186,13 +193,13 @@ Architecture, invariants, threat model, and tests over hand-built cases. No capa
 
 ### Level 1 — deterministic kernel
 
-Replay, evidence, bitemporal state, adjudication, transition verification, quarantine, activation, compilation, and procedure-promotion invariants pass locally and in CI.
+Replay, evidence, bitemporal state, adjudication, transition verification, quarantine, activation, compilation, procedure-promotion, change-feed delivery, and selected-object-read invariants pass locally and in CI.
 
 Allowed claim: "the kernel enforces these tested contracts."
 
 ### Level 2 — controlled synthetic memory
 
-Stress updates, contradictions, poisoning, multi-target recall, and growth over millions of generated events.
+Stress updates, contradictions, poisoning, multi-target recall, selected-object reads, and growth over millions of generated events.
 
 Allowed claim: "the system maintains specified memory properties under controlled workloads."
 
@@ -247,9 +254,100 @@ Do not report a headline number without a machine-readable manifest and a rerunn
 
 ## Durable delivery and consumer evaluation
 
-Delivery tests must cover genesis versus explicit-tail bootstrap, multi-batch catch-up, stable batch
-identity after concurrent appends, persisted checkpoint verification, forged/copy capability
-rejection, exact pending retry after concurrent tail advancement, reentrancy, configuration drift,
-namespace overlap/cross-consumer access, leaked-capability revocation, joins/subqueries and SQL escape
-attempts, parameter bounds, single-read request/binding snapshots, idempotent restart, fault injection, real process crash, consumer-schema
-tampering, raw SQLite byte corruption, and independent consumer chains.
+Delivery tests must cover genesis versus explicit-tail bootstrap, multi-batch catch-up, stable batch identity after concurrent appends, persisted checkpoint verification, forged/copy capability rejection, exact pending retry after concurrent tail advancement, reentrancy, configuration drift, namespace overlap/cross-consumer access, leaked-capability revocation, joins/subqueries and SQL escape attempts, parameter bounds, single-read request/binding snapshots, idempotent restart, fault injection, real process crash, consumer-schema tampering, raw SQLite byte corruption, and independent consumer chains.
+
+## Canonical object-read evaluation
+
+The selected-object path must be evaluated separately from candidate retrieval and separately from full forensic audit.
+
+### Correctness parity
+
+For generated and adversarial histories, compare every selected result with deterministic replay of the same canonical prefix:
+
+```text
+object-read projection result == canonical replay result
+```
+
+Cover:
+
+- current evidence and claims;
+- transaction-time `knownAt` versions;
+- claim world-time `validAt` views;
+- superseded and revoked states;
+- evidence available/restricted/deleted transitions;
+- exact evidence-reference closure;
+- explicit global and project scope combinations.
+
+### Tamper matrix
+
+Mutate independently and coherently:
+
+- canonical state JSON;
+- state digest;
+- version row digest;
+- head digest;
+- transaction interval;
+- deterministic bucket assignment;
+- bucket item count and digest;
+- sparse sibling and internal node;
+- published root and count;
+- cursor digest, batch ID, revision, and configuration digest;
+- claim evidence ID, source groups, authority, digest, and roles.
+
+Selected reads and `audit()` must fail closed for every corruption class they claim to detect. Coherent replacement of the whole derived database is outside the v1 internal-root guarantee and must be tested against the future external-commitment boundary rather than misreported as solved.
+
+### Concurrency and snapshot consistency
+
+Exercise canonical and projection advancement between individual operations in:
+
+- bounded address rehydration;
+- claim plus supporting-evidence closure;
+- repeated current lookups;
+- restart and catch-up.
+
+A compound result must contain one exact cursor, consumer revision, batch ID, and configuration digest, or fail closed and require retry.
+
+### Scale protocol
+
+Generate at least the following history sizes when practical:
+
+```text
+10k
+100k
+1M
+10M events
+```
+
+At each size measure cold and warm:
+
+- one evidence lookup;
+- one claim lookup;
+- one historical lookup;
+- one claim plus all supporting evidence;
+- 10 and 100 address rehydration;
+- canonical batch catch-up;
+- startup verification;
+- full audit;
+- genesis rebuild;
+- selected bucket distribution and worst bucket;
+- proof bytes and SQL rows read.
+
+The selected-read benchmark must instrument or wrap the canonical ledger and demonstrate that no lifetime `readRange` calls occur on the normal lookup path. Timing alone is insufficient evidence of bounded behavior.
+
+### Run manifest
+
+Store machine-readable manifests with:
+
+- commit and tree SHA;
+- Node and SQLite versions;
+- dataset generator and seed;
+- exact event count and object/version count;
+- bucket bits and configuration digest;
+- hardware and operating system;
+- cold/warm cache state;
+- repetitions and percentiles;
+- raw results and failures;
+- full audit/rebuild commands;
+- canonical range-read counters.
+
+Until this protocol is run beyond small synthetic fixtures, the allowed claim is limited to: "the selected-read implementation avoids lifetime ledger replay in the tested path and enforces the documented integrity contracts." 
