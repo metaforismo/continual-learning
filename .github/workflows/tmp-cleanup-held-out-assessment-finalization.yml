@@ -1,0 +1,70 @@
+name: Temporary cleanup held-out assessment finalization
+
+on:
+  push:
+    branches:
+      - tmp/cleanup-held-out-assessment-finalization
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  cleanup:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    env:
+      GH_TOKEN: ${{ github.token }}
+      REPOSITORY: metaforismo/continual-learning
+      PRODUCT_PR: "21"
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 2
+
+      - name: Verify merged product PR and clean allowlisted branches
+        shell: bash
+        run: |
+          set -euo pipefail
+          pr="$(gh api "repos/$REPOSITORY/pulls/$PRODUCT_PR")"
+          test "$(jq -r '.merged' <<<"$pr")" = true
+          test "$(jq -r '.base.ref' <<<"$pr")" = main
+          test "$(jq -r '.head.ref' <<<"$pr")" = feat/held-out-canary-result-assessment-v1
+          merge_sha="$(jq -r '.merge_commit_sha' <<<"$pr")"
+          test -n "$merge_sha"
+          test "$merge_sha" != null
+          git fetch origin main
+          test "$(git rev-parse origin/main)" = "$merge_sha"
+
+          probe_heads=(
+            tmp/native-transfer-held-out-assessment
+            tmp/probe-release-transfer-capability
+          )
+          for branch in "${probe_heads[@]}"; do
+            prs="$(gh api "repos/$REPOSITORY/pulls?state=open&head=metaforismo:$branch&per_page=100")"
+            while IFS= read -r number; do
+              [[ -n "$number" ]] || continue
+              gh api --method PATCH "repos/$REPOSITORY/pulls/$number" -f state=closed >/dev/null
+            done < <(jq -r '.[].number' <<<"$prs")
+          done
+
+          branches=(
+            feat/held-out-canary-result-assessment-v1
+            tmp/finalize-held-out-canary-result-assessment-v1
+            tmp/native-transfer-held-out-assessment
+            tmp/probe-release-transfer-capability
+            tmp/cleanup-native-transfer-probe
+            tmp/noop-output-probe
+            tmp/release-transfer-anchor
+            tmp/release-transfer-anchor-2
+          )
+
+          open="$(gh api "repos/$REPOSITORY/pulls?state=open&per_page=100")"
+          for branch in "${branches[@]}"; do
+            test "$(jq --arg branch "$branch" '[.[] | select(.head.ref == $branch)] | length' <<<"$open")" -eq 0
+            if git ls-remote --exit-code --heads origin "$branch" >/dev/null 2>&1; then
+              git push origin --delete "$branch"
+            fi
+          done
+
+          git push origin --delete tmp/cleanup-held-out-assessment-finalization || true
