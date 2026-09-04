@@ -1,0 +1,207 @@
+name: Temporary release gate held-out assessment v2 20260904
+
+on:
+  push:
+    branches:
+      - tmp/release-gate-held-out-assessment-v2-20260904
+
+permissions:
+  actions: read
+  checks: read
+  contents: write
+  pull-requests: write
+
+concurrency:
+  group: release-gate-held-out-assessment-v2-20260904
+  cancel-in-progress: false
+
+jobs:
+  verify:
+    name: verify exact PR head and official CI
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    env:
+      GH_TOKEN: ${{ github.token }}
+      REPOSITORY: metaforismo/continual-learning
+      PR_NUMBER: "21"
+      FEATURE_BRANCH: feat/held-out-canary-result-assessment-v1-final
+    steps:
+      - name: Checkout release-gate branch
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          fetch-depth: 0
+
+      - name: Set up Node.js 22.16.0
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        with:
+          node-version: 22.16.0
+
+      - name: Verify PR identity, review state, changed-file boundary, and official CI
+        id: preflight
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          gate_sha="$(git rev-parse HEAD)"
+          base_sha="$(git rev-parse HEAD^)"
+          git fetch --prune origin main "$FEATURE_BRANCH"
+          test "$(git rev-parse origin/main)" = "$base_sha"
+
+          pr="$(gh api "repos/$REPOSITORY/pulls/$PR_NUMBER")"
+          test "$(jq -r '.state' <<<"$pr")" = open
+          test "$(jq -r '.draft' <<<"$pr")" = false
+          test "$(jq -r '.base.ref' <<<"$pr")" = main
+          test "$(jq -r '.base.sha' <<<"$pr")" = "$base_sha"
+          test "$(jq -r '.head.ref' <<<"$pr")" = "$FEATURE_BRANCH"
+
+          head_sha="$(jq -r '.head.sha' <<<"$pr")"
+          test -n "$head_sha"
+          test "$head_sha" != null
+          test "$(git rev-parse "origin/$FEATURE_BRANCH")" = "$head_sha"
+          git merge-base --is-ancestor "$base_sha" "$head_sha"
+          test "$(git rev-parse "$head_sha^")" = "$base_sha"
+
+          head_tree="$(git rev-parse "$head_sha^{tree}")"
+          test -n "$head_tree"
+
+          open_same_head="$(gh api "repos/$REPOSITORY/pulls?state=open&head=metaforismo:$FEATURE_BRANCH&per_page=100")"
+          test "$(jq 'length' <<<"$open_same_head")" -eq 1
+          test "$(jq -r '.[0].number' <<<"$open_same_head")" = "$PR_NUMBER"
+
+          changed="$(gh api "repos/$REPOSITORY/pulls/$PR_NUMBER/files?per_page=100")"
+          changed_count="$(jq 'length' <<<"$changed")"
+          test "$changed_count" -gt 0
+          test "$changed_count" -le 24
+          test "$(jq '[.[] | select(.filename | startswith(".github/") or startswith("dist/") or startswith("node_modules/") or startswith("coverage/"))] | length' <<<"$changed")" -eq 0
+
+          reviews="$(gh api "repos/$REPOSITORY/pulls/$PR_NUMBER/reviews?per_page=100")"
+          test "$(jq '[.[] | select(.state == "CHANGES_REQUESTED")] | length' <<<"$reviews")" -eq 0
+
+          owner="${REPOSITORY%%/*}"
+          repo="${REPOSITORY##*/}"
+          threads="$(gh api graphql \
+            -f owner="$owner" \
+            -f repo="$repo" \
+            -F number="$PR_NUMBER" \
+            -f query='query($owner:String!,$repo:String!,$number:Int!){repository(owner:$owner,name:$repo){pullRequest(number:$number){reviewThreads(first:100){nodes{isResolved}}}}}')"
+          test "$(jq '[.data.repository.pullRequest.reviewThreads.nodes[] | select(.isResolved == false)] | length' <<<"$threads")" -eq 0
+
+          deadline=$((SECONDS + 900))
+          while true; do
+            pr="$(gh api "repos/$REPOSITORY/pulls/$PR_NUMBER")"
+            synthetic_sha="$(jq -r '.merge_commit_sha // empty' <<<"$pr")"
+            if [[ -n "$synthetic_sha" ]]; then
+              synthetic="$(gh api "repos/$REPOSITORY/git/commits/$synthetic_sha")"
+              parent_base="$(jq --arg base "$base_sha" '[.parents[].sha | select(. == $base)] | length' <<<"$synthetic")"
+              parent_head="$(jq --arg head "$head_sha" '[.parents[].sha | select(. == $head)] | length' <<<"$synthetic")"
+              if [[ "$synthetic_sha" == "$head_sha" ]]; then
+                parent_base=1
+                parent_head=1
+              fi
+              if [[ "$parent_base" -eq 1 && "$parent_head" -eq 1 ]]; then
+                checks="$(gh api -H 'Accept: application/vnd.github+json' "repos/$REPOSITORY/commits/$synthetic_sha/check-runs?per_page=100")"
+                fixed="$(jq -r '[.check_runs[] | select(.name == "Node 22.16.0")] | sort_by(.started_at) | last | (.conclusion // .status // "missing")' <<<"$checks")"
+                current="$(jq -r '[.check_runs[] | select(.name == "Node 22.x")] | sort_by(.started_at) | last | (.conclusion // .status // "missing")' <<<"$checks")"
+                if [[ "$fixed" == success && "$current" == success ]]; then
+                  break
+                fi
+                for value in "$fixed" "$current"; do
+                  case "$value" in
+                    failure|cancelled|timed_out|action_required|stale|startup_failure)
+                      echo "required PR CI failed: $value" >&2
+                      exit 1
+                      ;;
+                  esac
+                done
+              fi
+            fi
+            if (( SECONDS >= deadline )); then
+              echo "timed out waiting for the exact synthetic-merge CI" >&2
+              exit 1
+            fi
+            sleep 10
+          done
+
+          echo "gate_sha=$gate_sha" >> "$GITHUB_OUTPUT"
+          echo "base_sha=$base_sha" >> "$GITHUB_OUTPUT"
+          echo "head_sha=$head_sha" >> "$GITHUB_OUTPUT"
+          echo "head_tree=$head_tree" >> "$GITHUB_OUTPUT"
+          echo "synthetic_sha=$synthetic_sha" >> "$GITHUB_OUTPUT"
+          echo "changed_count=$changed_count" >> "$GITHUB_OUTPUT"
+
+      - name: Run fresh exact-head gates
+        shell: bash
+        env:
+          BASE_SHA: ${{ steps.preflight.outputs.base_sha }}
+          HEAD_SHA: ${{ steps.preflight.outputs.head_sha }}
+          HEAD_TREE: ${{ steps.preflight.outputs.head_tree }}
+        run: |
+          set -euo pipefail
+          git clean -ffdx
+          git checkout --detach "$HEAD_SHA"
+          test "$(git rev-parse HEAD)" = "$HEAD_SHA"
+          test "$(git rev-parse HEAD^)" = "$BASE_SHA"
+          test "$(git rev-parse HEAD^{tree})" = "$HEAD_TREE"
+          git diff --check "$BASE_SHA" "$HEAD_SHA" --
+          npm ci --ignore-scripts --no-audit --no-fund
+          npm run build
+          node --test test/canonical-canary-receipts.test.mjs
+          node --test test/held-out-canary-result-assessment.test.mjs
+          npm run check
+          npm audit --omit=dev --audit-level=high
+          git diff --check "$BASE_SHA" "$HEAD_SHA" --
+          test -z "$(git status --porcelain)"
+
+          cat > /tmp/release-gate-evidence.txt <<EOF
+          repository=$REPOSITORY
+          pull_request=$PR_NUMBER
+          base_sha=$BASE_SHA
+          feature_branch=$FEATURE_BRANCH
+          feature_sha=$HEAD_SHA
+          feature_tree=$HEAD_TREE
+          synthetic_merge_sha=${{ steps.preflight.outputs.synthetic_sha }}
+          changed_files=${{ steps.preflight.outputs.changed_count }}
+          official_pr_ci_node_22_16=success
+          official_pr_ci_node_22_x=success
+          canonical_receipt_suite=success
+          held_out_assessment_suite=success
+          full_suite=success
+          production_audit=success
+          release_gate=success
+          EOF
+
+      - name: Record exact release gate on pull request
+        shell: bash
+        env:
+          BASE_SHA: ${{ steps.preflight.outputs.base_sha }}
+          HEAD_SHA: ${{ steps.preflight.outputs.head_sha }}
+          HEAD_TREE: ${{ steps.preflight.outputs.head_tree }}
+        run: |
+          set -euo pipefail
+          body=$(cat <<EOF
+          Exact release gate passed.
+
+          - base: \`$BASE_SHA\`
+          - feature head: \`$HEAD_SHA\`
+          - feature tree: \`$HEAD_TREE\`
+          - official pull-request CI: Node 22.16.0 and Node 22.x passed
+          - fresh dependency installation, TypeScript strict build, canonical receipt suite, held-out assessment suite, complete repository suite, diff check, and production audit passed
+          - no scheduling, execution, rollback, lifecycle, or procedure-promotion authority was introduced
+          EOF
+          )
+          gh api --method POST "repos/$REPOSITORY/issues/$PR_NUMBER/comments" -f body="$body" >/dev/null
+
+      - name: Upload release-gate evidence
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: continual-learning-held-out-assessment-release-gate-v2
+          path: /tmp/release-gate-evidence.txt
+          if-no-files-found: error
+          retention-days: 1
+
+      - name: Delete release-gate branch
+        if: success()
+        shell: bash
+        run: |
+          set -euo pipefail
+          gh api --method DELETE "repos/$REPOSITORY/git/refs/heads/$GITHUB_REF_NAME" || true
