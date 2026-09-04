@@ -1,0 +1,210 @@
+name: Temporary post-merge held-out assessment v2 20260904
+
+on:
+  push:
+    branches:
+      - tmp/postmerge-heldout-assessment-v2-20260904
+
+permissions:
+  actions: read
+  checks: read
+  contents: write
+  pull-requests: write
+
+concurrency:
+  group: postmerge-heldout-assessment-v2-20260904
+  cancel-in-progress: false
+
+jobs:
+  verify:
+    name: verify published main, official CI, and cleanup
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    env:
+      GH_TOKEN: ${{ github.token }}
+      REPOSITORY: metaforismo/continual-learning
+      PR_NUMBER: "21"
+      FEATURE_BRANCH: feat/held-out-canary-result-assessment-v1-final
+    steps:
+      - name: Checkout post-merge verifier branch
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          fetch-depth: 0
+
+      - name: Set up Node.js 22.16.0
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        with:
+          node-version: 22.16.0
+
+      - name: Bind verifier to the exact merged pull request
+        id: bind
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          verifier_sha="$(git rev-parse HEAD)"
+          merge_sha="$(git rev-parse HEAD^)"
+          git fetch --prune origin main
+          test "$(git rev-parse origin/main)" = "$merge_sha"
+
+          pr="$(gh api "repos/$REPOSITORY/pulls/$PR_NUMBER")"
+          test "$(jq -r '.state' <<<"$pr")" = closed
+          test "$(jq -r '.merged' <<<"$pr")" = true
+          test "$(jq -r '.base.ref' <<<"$pr")" = main
+          test "$(jq -r '.head.ref' <<<"$pr")" = "$FEATURE_BRANCH"
+          test "$(jq -r '.merge_commit_sha' <<<"$pr")" = "$merge_sha"
+
+          feature_sha="$(jq -r '.head.sha' <<<"$pr")"
+          test -n "$feature_sha"
+          test "$feature_sha" != null
+          git fetch origin "$FEATURE_BRANCH"
+          test "$(git rev-parse "origin/$FEATURE_BRANCH")" = "$feature_sha"
+
+          feature_tree="$(git rev-parse "$feature_sha^{tree}")"
+          merge_tree="$(git rev-parse "$merge_sha^{tree}")"
+          test "$merge_tree" = "$feature_tree"
+
+          echo "verifier_sha=$verifier_sha" >> "$GITHUB_OUTPUT"
+          echo "merge_sha=$merge_sha" >> "$GITHUB_OUTPUT"
+          echo "merge_tree=$merge_tree" >> "$GITHUB_OUTPUT"
+          echo "feature_sha=$feature_sha" >> "$GITHUB_OUTPUT"
+
+      - name: Run fresh gates on the published main commit
+        shell: bash
+        env:
+          MERGE_SHA: ${{ steps.bind.outputs.merge_sha }}
+          MERGE_TREE: ${{ steps.bind.outputs.merge_tree }}
+        run: |
+          set -euo pipefail
+          git clean -ffdx
+          git checkout --detach "$MERGE_SHA"
+          test "$(git rev-parse HEAD)" = "$MERGE_SHA"
+          test "$(git rev-parse HEAD^{tree})" = "$MERGE_TREE"
+          npm ci --ignore-scripts --no-audit --no-fund
+          npm run build
+          node --test test/canonical-canary-receipts.test.mjs
+          node --test test/held-out-canary-result-assessment.test.mjs
+          npm run check
+          npm audit --omit=dev --audit-level=high
+          git diff --check HEAD^ HEAD --
+          test -z "$(git status --porcelain)"
+
+      - name: Wait for official post-merge CI on the exact main SHA
+        id: ci
+        shell: bash
+        env:
+          MERGE_SHA: ${{ steps.bind.outputs.merge_sha }}
+        run: |
+          set -euo pipefail
+
+          deadline=$((SECONDS + 900))
+          while true; do
+            runs="$(gh api "repos/$REPOSITORY/actions/runs?event=push&branch=main&per_page=100")"
+            run="$(jq -c --arg sha "$MERGE_SHA" '[.workflow_runs[] | select(.name == "CI" and .head_sha == $sha)] | sort_by(.created_at) | last // {}' <<<"$runs")"
+            run_id="$(jq -r '.id // empty' <<<"$run")"
+            status="$(jq -r '.status // "missing"' <<<"$run")"
+            conclusion="$(jq -r '.conclusion // "missing"' <<<"$run")"
+
+            if [[ -n "$run_id" && "$status" == completed ]]; then
+              if [[ "$conclusion" != success ]]; then
+                echo "official post-merge CI failed: $conclusion" >&2
+                exit 1
+              fi
+              jobs="$(gh api "repos/$REPOSITORY/actions/runs/$run_id/jobs?per_page=100")"
+              test "$(jq '[.jobs[] | select(.name == "Node 22.16.0" and .conclusion == "success")] | length' <<<"$jobs")" -ge 1
+              test "$(jq '[.jobs[] | select(.name == "Node 22.x" and .conclusion == "success")] | length' <<<"$jobs")" -ge 1
+              echo "run_id=$run_id" >> "$GITHUB_OUTPUT"
+              break
+            fi
+
+            if (( SECONDS >= deadline )); then
+              echo "timed out waiting for official post-merge CI" >&2
+              exit 1
+            fi
+            sleep 10
+          done
+
+      - name: Record post-merge evidence
+        shell: bash
+        env:
+          FEATURE_SHA: ${{ steps.bind.outputs.feature_sha }}
+          MERGE_SHA: ${{ steps.bind.outputs.merge_sha }}
+          MERGE_TREE: ${{ steps.bind.outputs.merge_tree }}
+          CI_RUN: ${{ steps.ci.outputs.run_id }}
+        run: |
+          set -euo pipefail
+
+          cat > /tmp/postmerge-evidence.txt <<EOF
+          repository=$REPOSITORY
+          pull_request=$PR_NUMBER
+          feature_branch=$FEATURE_BRANCH
+          feature_sha=$FEATURE_SHA
+          merge_sha=$MERGE_SHA
+          merge_tree=$MERGE_TREE
+          official_post_merge_ci_run=$CI_RUN
+          node_22_16=success
+          node_22_x=success
+          canonical_receipt_suite=success
+          held_out_assessment_suite=success
+          full_suite=success
+          production_audit=success
+          published_main_verification=success
+          authority_granted=false
+          EOF
+
+          body=$(cat <<EOF
+          Published-main verification completed successfully.
+
+          - feature head: \`$FEATURE_SHA\`
+          - squash merge / current \`main\`: \`$MERGE_SHA\`
+          - product tree: \`$MERGE_TREE\`
+          - fresh dependency installation, TypeScript strict build, canonical receipt suite, held-out assessment suite, complete repository suite, diff check, and production audit passed on the published commit
+          - official post-merge CI run \`$CI_RUN\` passed on Node 22.16.0 and Node 22.x
+          - no scheduling, execution, rollback, lifecycle, or procedure-promotion authority was introduced
+          EOF
+          )
+          gh api --method POST "repos/$REPOSITORY/issues/$PR_NUMBER/comments" -f body="$body" >/dev/null
+
+      - name: Upload post-merge evidence
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: continual-learning-held-out-assessment-postmerge-v2
+          path: /tmp/postmerge-evidence.txt
+          if-no-files-found: error
+          retention-days: 1
+
+      - name: Cleanup feature and temporary branches
+        if: success()
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          branches=(
+            feat/held-out-canary-result-assessment-v1-final
+            tmp/bootstrap-held-out-canary-assessment-v2-20260904
+            tmp/release-gate-held-out-assessment-v2-20260904
+            tmp/release-held-out-assessment-v2-20260904
+            tmp/finalize-held-out-canary-result-assessment-v1
+            tmp/finalize-held-out-canary-result-assessment-v1-r2
+            tmp/finalize-held-out-canary-result-assessment-v1-r3
+            tmp/finalize-held-out-canary-result-assessment-v1-r4
+            tmp/release-held-out-canary-result-assessment-v1
+            tmp/cleanup-held-out-assessment-finalization
+            tmp/noop-output-probe
+            tmp/release-transfer-anchor
+            tmp/release-transfer-anchor-2
+            tmp/release-upload-check
+            tmp/native-transfer-held-out-assessment
+            tmp/probe-release-transfer-capability
+            tmp/cleanup-native-transfer-probe
+          )
+
+          open="$(gh api "repos/$REPOSITORY/pulls?state=open&per_page=100")"
+          for branch in "${branches[@]}"; do
+            test "$(jq --arg branch "$branch" '[.[] | select(.head.ref == $branch)] | length' <<<"$open")" -eq 0
+            if gh api "repos/$REPOSITORY/git/ref/heads/$branch" >/dev/null 2>&1; then
+              gh api --method DELETE "repos/$REPOSITORY/git/refs/heads/$branch"
+            fi
+          done
+
+          gh api --method DELETE "repos/$REPOSITORY/git/refs/heads/$GITHUB_REF_NAME" || true
