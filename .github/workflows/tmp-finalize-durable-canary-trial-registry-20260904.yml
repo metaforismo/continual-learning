@@ -1,0 +1,276 @@
+name: Temporary finalize durable canary trial registry 20260904
+
+on:
+  push:
+    branches:
+      - tmp/finalize-durable-canary-trial-registry-20260904
+
+permissions:
+  contents: write
+  pull-requests: write
+  actions: read
+  checks: read
+
+concurrency:
+  group: finalize-durable-canary-trial-registry-20260904
+  cancel-in-progress: false
+
+jobs:
+  finalize:
+    name: verify exact head, merge, verify main, and clean
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
+    env:
+      GH_TOKEN: ${{ github.token }}
+      REPOSITORY: metaforismo/continual-learning
+      OWNER: metaforismo
+      REPO: continual-learning
+      PR_NUMBER: "22"
+      FEATURE_BRANCH: feat/durable-canary-trial-registry-v1
+      MANIFEST_URL: https://durable-registry-transfer-site.vercel.app/manifest.json
+    steps:
+      - name: Checkout exact finalizer branch
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          fetch-depth: 0
+
+      - name: Set up Node.js 22.16.0
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        with:
+          node-version: 22.16.0
+
+      - name: Verify PR identity, tree, review state, and official CI
+        id: preflight
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          curl --fail --silent --show-error --location "$MANIFEST_URL" --output /tmp/manifest.json
+          test "$(jq -r '.repository' /tmp/manifest.json)" = "$REPOSITORY"
+          test "$(jq -r '.feature_branch' /tmp/manifest.json)" = "$FEATURE_BRANCH"
+          expected_base="$(jq -r '.base_sha' /tmp/manifest.json)"
+          expected_base_tree="$(jq -r '.base_tree' /tmp/manifest.json)"
+          expected_tree="$(jq -r '.reviewed_feature_tree' /tmp/manifest.json)"
+
+          test "$(git rev-parse HEAD^)" = "$expected_base"
+          git fetch --prune origin main "$FEATURE_BRANCH"
+          test "$(git rev-parse origin/main)" = "$expected_base"
+          test "$(git rev-parse "$expected_base^{tree}")" = "$expected_base_tree"
+
+          pr_json="$(gh api "repos/$REPOSITORY/pulls/$PR_NUMBER")"
+          test "$(jq -r '.state' <<<"$pr_json")" = open
+          test "$(jq -r '.draft' <<<"$pr_json")" = false
+          test "$(jq -r '.base.ref' <<<"$pr_json")" = main
+          test "$(jq -r '.base.sha' <<<"$pr_json")" = "$expected_base"
+          test "$(jq -r '.head.ref' <<<"$pr_json")" = "$FEATURE_BRANCH"
+
+          head_sha="$(jq -r '.head.sha' <<<"$pr_json")"
+          test -n "$head_sha"
+          test "$head_sha" != null
+          test "$(git rev-parse "origin/$FEATURE_BRANCH")" = "$head_sha"
+          test "$(git rev-parse "$head_sha^")" = "$expected_base"
+          test "$(git rev-parse "$head_sha^{tree}")" = "$expected_tree"
+
+          changed="$(gh api "repos/$REPOSITORY/pulls/$PR_NUMBER/files?per_page=100")"
+          test "$(jq 'length' <<<"$changed")" -gt 0
+          jq -r '.[].filename' <<<"$changed" | sort > /tmp/pr-files.txt
+          jq -r '.changed_files[]' /tmp/manifest.json | sort > /tmp/expected-files.txt
+          diff -u /tmp/expected-files.txt /tmp/pr-files.txt
+          test "$(jq '[.[] | select(.filename | startswith(".github/") or startswith("dist/") or startswith("node_modules/") or startswith("tmp/"))] | length' <<<"$changed")" -eq 0
+
+          reviews="$(gh api "repos/$REPOSITORY/pulls/$PR_NUMBER/reviews?per_page=100")"
+          test "$(jq '[.[] | select(.state == "CHANGES_REQUESTED")] | length' <<<"$reviews")" -eq 0
+          threads="$(gh api graphql \
+            -f query='query($owner:String!,$name:String!,$number:Int!){repository(owner:$owner,name:$name){pullRequest(number:$number){reviewThreads(first:100){nodes{isResolved}}}}}' \
+            -f owner="$OWNER" -f name="$REPO" -F number="$PR_NUMBER")"
+          test "$(jq '[.data.repository.pullRequest.reviewThreads.nodes[] | select(.isResolved == false)] | length' <<<"$threads")" -eq 0
+
+          deadline=$((SECONDS + 1200))
+          while true; do
+            runs="$(gh api "repos/$REPOSITORY/actions/runs?event=pull_request&per_page=100")"
+            run_id="$(jq -r --arg branch "$FEATURE_BRANCH" --argjson pr "$PR_NUMBER" '[.workflow_runs[] | select(.name == "CI" and .head_branch == $branch and ([.pull_requests[].number] | index($pr)))] | sort_by(.created_at) | last | .id // empty' <<<"$runs")"
+            status="$(jq -r --arg branch "$FEATURE_BRANCH" --argjson pr "$PR_NUMBER" '[.workflow_runs[] | select(.name == "CI" and .head_branch == $branch and ([.pull_requests[].number] | index($pr)))] | sort_by(.created_at) | last | .status // "missing"' <<<"$runs")"
+            conclusion="$(jq -r --arg branch "$FEATURE_BRANCH" --argjson pr "$PR_NUMBER" '[.workflow_runs[] | select(.name == "CI" and .head_branch == $branch and ([.pull_requests[].number] | index($pr)))] | sort_by(.created_at) | last | .conclusion // "pending"' <<<"$runs")"
+
+            if [[ -n "$run_id" && "$status" == completed && "$conclusion" == success ]]; then
+              jobs="$(gh api "repos/$REPOSITORY/actions/runs/$run_id/jobs?per_page=100")"
+              fixed="$(jq -r '[.jobs[] | select(.name == "Node 22.16.0")] | sort_by(.started_at) | last | .conclusion // "missing"' <<<"$jobs")"
+              current="$(jq -r '[.jobs[] | select(.name == "Node 22.x")] | sort_by(.started_at) | last | .conclusion // "missing"' <<<"$jobs")"
+              if [[ "$fixed" == success && "$current" == success ]]; then
+                echo "pr_run_id=$run_id" >> "$GITHUB_OUTPUT"
+                break
+              fi
+            fi
+            if [[ "$status" == completed && "$conclusion" != success && "$conclusion" != pending ]]; then
+              echo "required PR CI failed: $conclusion" >&2
+              exit 1
+            fi
+            (( SECONDS < deadline )) || { echo "timed out waiting for PR CI" >&2; exit 1; }
+            sleep 10
+          done
+
+          echo "expected_base=$expected_base" >> "$GITHUB_OUTPUT"
+          echo "expected_tree=$expected_tree" >> "$GITHUB_OUTPUT"
+          echo "head_sha=$head_sha" >> "$GITHUB_OUTPUT"
+
+      - name: Fresh detached exact-head validation
+        shell: bash
+        env:
+          EXPECTED_BASE: ${{ steps.preflight.outputs.expected_base }}
+          EXPECTED_TREE: ${{ steps.preflight.outputs.expected_tree }}
+          HEAD_SHA: ${{ steps.preflight.outputs.head_sha }}
+        run: |
+          set -euo pipefail
+          git checkout --detach "$HEAD_SHA"
+          test "$(git rev-parse HEAD)" = "$HEAD_SHA"
+          test "$(git rev-parse HEAD^)" = "$EXPECTED_BASE"
+          test "$(git rev-parse HEAD^{tree})" = "$EXPECTED_TREE"
+          git diff --check "$EXPECTED_BASE" "$HEAD_SHA" --
+          npm ci --ignore-scripts --no-audit --no-fund
+          npm run build
+          node --test test/durable-canary-trial-registry.test.mjs
+          node --test test/canonical-canary-receipts.test.mjs
+          node --test test/held-out-canary-result-assessment.test.mjs
+          npm run check
+          npm audit --omit=dev --audit-level=high
+          git diff --check "$EXPECTED_BASE" "$HEAD_SHA" --
+
+      - name: Squash merge exact reviewed head
+        id: merge
+        shell: bash
+        env:
+          EXPECTED_BASE: ${{ steps.preflight.outputs.expected_base }}
+          HEAD_SHA: ${{ steps.preflight.outputs.head_sha }}
+        run: |
+          set -euo pipefail
+          test "$(git ls-remote origin refs/heads/main | cut -f1)" = "$EXPECTED_BASE"
+          result="$(gh api --method PUT "repos/$REPOSITORY/pulls/$PR_NUMBER/merge" \
+            -f merge_method=squash \
+            -f sha="$HEAD_SHA")"
+          test "$(jq -r '.merged' <<<"$result")" = true
+          merge_sha="$(jq -r '.sha' <<<"$result")"
+          test -n "$merge_sha"
+          test "$merge_sha" != null
+          echo "merge_sha=$merge_sha" >> "$GITHUB_OUTPUT"
+
+      - name: Verify published main and official post-merge CI
+        id: postmerge
+        shell: bash
+        env:
+          EXPECTED_TREE: ${{ steps.preflight.outputs.expected_tree }}
+          HEAD_SHA: ${{ steps.preflight.outputs.head_sha }}
+          MERGE_SHA: ${{ steps.merge.outputs.merge_sha }}
+        run: |
+          set -euo pipefail
+
+          deadline=$((SECONDS + 180))
+          while true; do
+            git fetch --prune origin main
+            [[ "$(git rev-parse origin/main)" == "$MERGE_SHA" ]] && break
+            (( SECONDS < deadline )) || { echo "main did not reach merge SHA" >&2; exit 1; }
+            sleep 3
+          done
+
+          test "$(git rev-parse "$HEAD_SHA^{tree}")" = "$EXPECTED_TREE"
+          test "$(git rev-parse "$MERGE_SHA^{tree}")" = "$EXPECTED_TREE"
+
+          git clean -ffdx
+          git checkout --detach "$MERGE_SHA"
+          npm ci --ignore-scripts --no-audit --no-fund
+          npm run build
+          node --test test/durable-canary-trial-registry.test.mjs
+          node --test test/canonical-canary-receipts.test.mjs
+          node --test test/held-out-canary-result-assessment.test.mjs
+          npm run check
+          npm audit --omit=dev --audit-level=high
+          git diff --check HEAD^ HEAD --
+
+          deadline=$((SECONDS + 1200))
+          while true; do
+            runs="$(gh api "repos/$REPOSITORY/actions/runs?event=push&branch=main&per_page=100")"
+            run_id="$(jq -r --arg head "$MERGE_SHA" '[.workflow_runs[] | select(.name == "CI" and .head_sha == $head)] | sort_by(.created_at) | last | .id // empty' <<<"$runs")"
+            status="$(jq -r --arg head "$MERGE_SHA" '[.workflow_runs[] | select(.name == "CI" and .head_sha == $head)] | sort_by(.created_at) | last | .status // "missing"' <<<"$runs")"
+            conclusion="$(jq -r --arg head "$MERGE_SHA" '[.workflow_runs[] | select(.name == "CI" and .head_sha == $head)] | sort_by(.created_at) | last | .conclusion // "pending"' <<<"$runs")"
+
+            if [[ -n "$run_id" && "$status" == completed && "$conclusion" == success ]]; then
+              jobs="$(gh api "repos/$REPOSITORY/actions/runs/$run_id/jobs?per_page=100")"
+              fixed="$(jq -r '[.jobs[] | select(.name == "Node 22.16.0")] | sort_by(.started_at) | last | .conclusion // "missing"' <<<"$jobs")"
+              current="$(jq -r '[.jobs[] | select(.name == "Node 22.x")] | sort_by(.started_at) | last | .conclusion // "missing"' <<<"$jobs")"
+              if [[ "$fixed" == success && "$current" == success ]]; then
+                echo "main_run_id=$run_id" >> "$GITHUB_OUTPUT"
+                break
+              fi
+            fi
+            if [[ "$status" == completed && "$conclusion" != success && "$conclusion" != pending ]]; then
+              echo "post-merge CI failed: $conclusion" >&2
+              exit 1
+            fi
+            (( SECONDS < deadline )) || { echo "timed out waiting for post-merge CI" >&2; exit 1; }
+            sleep 10
+          done
+
+          cat > /tmp/finalizer-evidence.txt <<EOF
+          repository=$REPOSITORY
+          pull_request=$PR_NUMBER
+          base_sha=${{ steps.preflight.outputs.expected_base }}
+          feature_sha=$HEAD_SHA
+          feature_tree=$EXPECTED_TREE
+          merge_sha=$MERGE_SHA
+          main_tree=$EXPECTED_TREE
+          pr_ci_run=${{ steps.preflight.outputs.pr_run_id }}
+          main_ci_run=$run_id
+          node=22.16.0
+          dedicated_registry_suite=success
+          canonical_receipt_suite=success
+          held_out_assessment_suite=success
+          full_suite=success
+          production_audit=success
+          post_merge_validation=success
+          EOF
+
+      - name: Record verified integration on PR
+        shell: bash
+        env:
+          HEAD_SHA: ${{ steps.preflight.outputs.head_sha }}
+          MERGE_SHA: ${{ steps.merge.outputs.merge_sha }}
+        run: |
+          set -euo pipefail
+          body=$(cat <<EOF
+          Exact-head finalization completed successfully.
+
+          - feature head: \`$HEAD_SHA\`
+          - squash merge / published main: \`$MERGE_SHA\`
+          - official PR CI passed on Node 22.16.0 and Node 22.x
+          - detached exact-head build, dedicated registry suite, receipt suite, assessment suite, full suite, diff check, and production audit passed
+          - the published main tree equals the reviewed clean-room tree
+          - fresh post-merge validation and official main CI passed
+          - durable records remain observational and grant no execution or procedure-promotion authority
+          EOF
+          )
+          gh api --method POST "repos/$REPOSITORY/issues/$PR_NUMBER/comments" -f body="$body" >/dev/null
+
+      - name: Upload finalizer evidence
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: durable-canary-trial-registry-finalizer-20260904
+          path: /tmp/finalizer-evidence.txt
+          if-no-files-found: error
+          retention-days: 1
+
+      - name: Delete integrated and temporary branches
+        if: success()
+        shell: bash
+        run: |
+          set -euo pipefail
+          branches=(
+            feat/durable-canary-trial-registry-v1
+            tmp/publish-durable-canary-trial-registry-20260904
+          )
+          open="$(gh api "repos/$REPOSITORY/pulls?state=open&per_page=100")"
+          for branch in "${branches[@]}"; do
+            test "$(jq --arg branch "$branch" '[.[] | select(.head.ref == $branch)] | length' <<<"$open")" -eq 0
+            if git ls-remote --exit-code --heads origin "$branch" >/dev/null 2>&1; then
+              git push origin --delete "$branch"
+            fi
+          done
+          git push origin --delete tmp/finalize-durable-canary-trial-registry-20260904 || true
