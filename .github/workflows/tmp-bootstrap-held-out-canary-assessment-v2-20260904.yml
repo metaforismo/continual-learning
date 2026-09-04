@@ -1,0 +1,170 @@
+name: Temporary bootstrap held-out canary assessment v2 20260904
+
+on:
+  push:
+    branches:
+      - tmp/bootstrap-held-out-canary-assessment-v2-20260904
+
+permissions:
+  contents: write
+  pull-requests: read
+
+concurrency:
+  group: bootstrap-held-out-canary-assessment-v2-20260904
+  cancel-in-progress: false
+
+jobs:
+  bootstrap:
+    name: rebase reviewed assessment onto current main
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    env:
+      GH_TOKEN: ${{ github.token }}
+      REPOSITORY: metaforismo/continual-learning
+      OLD_BASE: bf9926188c9f3c678bd84b5b9e506a22146e6080
+      REVIEWED_TREE: bdca3346fdd6bf3f9a9b3f5522c93490e4715599
+      REVIEWED_PATCH_SHA256: 60e6f0dc8e05c975ac194f2b9abf45db1a1ee732a0cb5523a761b7fd68dc553f
+      FEATURE_BRANCH: feat/held-out-canary-result-assessment-v1-final
+    steps:
+      - name: Checkout bootstrap branch
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          fetch-depth: 0
+
+      - name: Set up Node.js 22.16.0
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        with:
+          node-version: 22.16.0
+
+      - name: Reconstruct reviewed delta and apply it to current main
+        id: apply
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          bootstrap_sha="$(git rev-parse HEAD)"
+          base_sha="$(git rev-parse HEAD^)"
+          git fetch --prune origin main
+          test "$(git rev-parse origin/main)" = "$base_sha"
+          test "$(gh api "repos/$REPOSITORY/git/commits/$base_sha" --jq '.sha')" = "$base_sha"
+          test "$(gh api "repos/$REPOSITORY/git/trees/$REVIEWED_TREE" --jq '.sha')" = "$REVIEWED_TREE"
+
+          existing_ref="$(gh api "repos/$REPOSITORY/git/ref/heads/$FEATURE_BRANCH" --jq '.object.sha' 2>/dev/null || true)"
+          test -z "$existing_ref"
+          existing_prs="$(gh api "repos/$REPOSITORY/pulls?state=all&head=metaforismo:$FEATURE_BRANCH&per_page=100")"
+          test "$(jq 'length' <<<"$existing_prs")" -eq 0
+
+          reviewed_commit_json="$(gh api --method POST "repos/$REPOSITORY/git/commits" \
+            -f message='chore: reconstruct reviewed held-out assessment tree' \
+            -f tree="$REVIEWED_TREE" \
+            -f 'parents[]'="$OLD_BASE")"
+          reviewed_commit="$(jq -r '.sha' <<<"$reviewed_commit_json")"
+          test -n "$reviewed_commit"
+          test "$reviewed_commit" != null
+          test "$(jq -r '.tree.sha' <<<"$reviewed_commit_json")" = "$REVIEWED_TREE"
+          test "$(jq -r '.parents[0].sha' <<<"$reviewed_commit_json")" = "$OLD_BASE"
+
+          reviewed_ref="tmp/reviewed-held-out-assessment-$GITHUB_RUN_ID"
+          gh api --method POST "repos/$REPOSITORY/git/refs" \
+            -f ref="refs/heads/$reviewed_ref" \
+            -f sha="$reviewed_commit" >/dev/null
+          trap 'gh api --method DELETE "repos/$REPOSITORY/git/refs/heads/'"$reviewed_ref"'" >/dev/null 2>&1 || true' EXIT
+
+          git fetch origin "$reviewed_ref:refs/remotes/origin/$reviewed_ref"
+          test "$(git rev-parse "origin/$reviewed_ref")" = "$reviewed_commit"
+          test "$(git rev-parse "$reviewed_commit^{tree}")" = "$REVIEWED_TREE"
+          test "$(git rev-parse "$reviewed_commit^")" = "$OLD_BASE"
+
+          git diff --binary "$OLD_BASE" "$reviewed_commit" -- > /tmp/reviewed.patch
+          printf '%s  %s\n' "$REVIEWED_PATCH_SHA256" /tmp/reviewed.patch | sha256sum --check -
+
+          git checkout -b "$FEATURE_BRANCH" "$base_sha"
+          git cherry-pick --no-commit "$reviewed_commit"
+          test -z "$(git diff --name-only --diff-filter=U)"
+          test -n "$(git status --porcelain)"
+
+          changed="$(git diff --cached --name-only "$base_sha" --)"
+          test -n "$changed"
+          if grep -Eq '^(\.github/|dist/|node_modules/)' <<<"$changed"; then
+            echo "forbidden generated/workflow path in product diff" >&2
+            exit 1
+          fi
+
+          git diff --cached --check
+          git config user.name metaforismo
+          git config user.email 39646696+metaforismo@users.noreply.github.com
+          git commit -m 'feat: add held-out canary result assessment'
+          feature_sha="$(git rev-parse HEAD)"
+          feature_tree="$(git rev-parse HEAD^{tree})"
+          test "$(git rev-parse HEAD^)" = "$base_sha"
+
+          echo "base_sha=$base_sha" >> "$GITHUB_OUTPUT"
+          echo "feature_sha=$feature_sha" >> "$GITHUB_OUTPUT"
+          echo "feature_tree=$feature_tree" >> "$GITHUB_OUTPUT"
+          echo "reviewed_commit=$reviewed_commit" >> "$GITHUB_OUTPUT"
+          echo "bootstrap_sha=$bootstrap_sha" >> "$GITHUB_OUTPUT"
+
+      - name: Run clean product gates
+        shell: bash
+        env:
+          BASE_SHA: ${{ steps.apply.outputs.base_sha }}
+          FEATURE_SHA: ${{ steps.apply.outputs.feature_sha }}
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$FEATURE_SHA"
+          test "$(git rev-parse HEAD^)" = "$BASE_SHA"
+          git diff --check "$BASE_SHA" "$FEATURE_SHA" --
+          npm ci --ignore-scripts --no-audit --no-fund
+          npm run build
+          node --test test/canonical-canary-receipts.test.mjs
+          node --test test/held-out-canary-result-assessment.test.mjs
+          npm run check
+          npm audit --omit=dev --audit-level=high
+          git diff --check "$BASE_SHA" "$FEATURE_SHA" --
+          test -z "$(git status --porcelain)"
+
+      - name: Publish feature branch
+        shell: bash
+        env:
+          BASE_SHA: ${{ steps.apply.outputs.base_sha }}
+          FEATURE_SHA: ${{ steps.apply.outputs.feature_sha }}
+          FEATURE_TREE: ${{ steps.apply.outputs.feature_tree }}
+        run: |
+          set -euo pipefail
+          test "$(git ls-remote origin refs/heads/main | cut -f1)" = "$BASE_SHA"
+          test "$(git rev-parse HEAD)" = "$FEATURE_SHA"
+          test "$(git rev-parse HEAD^{tree})" = "$FEATURE_TREE"
+          git push origin "HEAD:refs/heads/$FEATURE_BRANCH"
+          test "$(git ls-remote origin "refs/heads/$FEATURE_BRANCH" | cut -f1)" = "$FEATURE_SHA"
+
+          cat > /tmp/bootstrap-evidence.txt <<EOF
+          repository=$REPOSITORY
+          base_sha=$BASE_SHA
+          feature_branch=$FEATURE_BRANCH
+          feature_sha=$FEATURE_SHA
+          feature_tree=$FEATURE_TREE
+          old_base=$OLD_BASE
+          reviewed_tree=$REVIEWED_TREE
+          reviewed_patch_sha256=$REVIEWED_PATCH_SHA256
+          canonical_receipt_suite=success
+          held_out_assessment_suite=success
+          full_suite=success
+          production_audit=success
+          EOF
+
+      - name: Upload bootstrap evidence
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: continual-learning-held-out-assessment-bootstrap-v2
+          path: |
+            /tmp/bootstrap-evidence.txt
+            /tmp/reviewed.patch
+          if-no-files-found: error
+          retention-days: 1
+
+      - name: Delete bootstrap branch
+        if: success()
+        shell: bash
+        run: |
+          set -euo pipefail
+          gh api --method DELETE "repos/$REPOSITORY/git/refs/heads/$GITHUB_REF_NAME" || true
