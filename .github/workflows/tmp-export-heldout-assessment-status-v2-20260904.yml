@@ -1,0 +1,145 @@
+name: Temporary export held-out assessment status v2 20260904
+
+on:
+  push:
+    branches:
+      - tmp/export-heldout-assessment-status-v2-20260904
+
+permissions:
+  actions: read
+  checks: read
+  contents: write
+  pull-requests: read
+
+jobs:
+  export:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    env:
+      GH_TOKEN: ${{ github.token }}
+      REPOSITORY: metaforismo/continual-learning
+      PR_NUMBER: "21"
+    steps:
+      - name: Checkout status branch
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          fetch-depth: 0
+
+      - name: Capture authoritative remote state
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          status_branch_sha="$(git rev-parse HEAD)"
+          status_base_sha="$(git rev-parse HEAD^)"
+          git fetch --prune origin main
+          live_main_sha="$(git rev-parse origin/main)"
+
+          pr="$(gh api "repos/$REPOSITORY/pulls/$PR_NUMBER")"
+          pr_state="$(jq -r '.state' <<<"$pr")"
+          pr_merged="$(jq -r '.merged' <<<"$pr")"
+          pr_head_ref="$(jq -r '.head.ref' <<<"$pr")"
+          pr_head_sha="$(jq -r '.head.sha' <<<"$pr")"
+          pr_base_sha="$(jq -r '.base.sha' <<<"$pr")"
+          pr_merge_sha="$(jq -r '.merge_commit_sha // ""' <<<"$pr")"
+
+          pr_head_tree="$(gh api "repos/$REPOSITORY/git/commits/$pr_head_sha" --jq '.tree.sha')"
+          live_main_tree="$(gh api "repos/$REPOSITORY/git/commits/$live_main_sha" --jq '.tree.sha')"
+
+          open_pulls="$(gh api "repos/$REPOSITORY/pulls?state=open&per_page=100")"
+          open_pull_count="$(jq 'length' <<<"$open_pulls")"
+
+          branches="$(gh api "repos/$REPOSITORY/branches?per_page=100")"
+          residue="$(jq -c '[.[].name | select(
+            contains("held-out-canary-result-assessment")
+            or contains("held-out-assessment-v2-20260904")
+            or contains("heldout-assessment-v2-20260904")
+            or contains("bootstrap-held-out-canary-assessment-v2-20260904")
+            or contains("release-gate-held-out-assessment-v2-20260904")
+            or contains("postmerge-heldout-assessment-v2-20260904")
+            or contains("final-audit-held-out-assessment-v2-20260904")
+          )]' <<<"$branches")"
+
+          main_runs="$(gh api "repos/$REPOSITORY/actions/runs?event=push&branch=main&per_page=100")"
+          official_ci="$(jq -c --arg sha "$live_main_sha" '[.workflow_runs[] | select(.name == "CI" and .head_sha == $sha)] | sort_by(.created_at) | last // {}' <<<"$main_runs")"
+          official_ci_id="$(jq -r '.id // ""' <<<"$official_ci")"
+          official_ci_status="$(jq -r '.status // "missing"' <<<"$official_ci")"
+          official_ci_conclusion="$(jq -r '.conclusion // "missing"' <<<"$official_ci")"
+
+          official_fixed="missing"
+          official_current="missing"
+          if [[ -n "$official_ci_id" ]]; then
+            jobs="$(gh api "repos/$REPOSITORY/actions/runs/$official_ci_id/jobs?per_page=100")"
+            official_fixed="$(jq -r '[.jobs[] | select(.name == "Node 22.16.0")] | sort_by(.started_at) | last | (.conclusion // .status // "missing")' <<<"$jobs")"
+            official_current="$(jq -r '[.jobs[] | select(.name == "Node 22.x")] | sort_by(.started_at) | last | (.conclusion // .status // "missing")' <<<"$jobs")"
+          fi
+
+          product_integrated=false
+          if [[ "$pr_merged" == true && "$live_main_sha" == "$pr_merge_sha" && "$live_main_tree" == "$pr_head_tree" ]]; then
+            product_integrated=true
+          fi
+
+          official_ci_green=false
+          if [[ "$official_ci_conclusion" == success && "$official_fixed" == success && "$official_current" == success ]]; then
+            official_ci_green=true
+          fi
+
+          mkdir -p status
+          jq -n \
+            --arg repository "$REPOSITORY" \
+            --arg captured_at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+            --arg status_branch_sha "$status_branch_sha" \
+            --arg status_base_sha "$status_base_sha" \
+            --arg live_main_sha "$live_main_sha" \
+            --arg live_main_tree "$live_main_tree" \
+            --argjson pr_number "$PR_NUMBER" \
+            --arg pr_state "$pr_state" \
+            --argjson pr_merged "$pr_merged" \
+            --arg pr_head_ref "$pr_head_ref" \
+            --arg pr_head_sha "$pr_head_sha" \
+            --arg pr_head_tree "$pr_head_tree" \
+            --arg pr_base_sha "$pr_base_sha" \
+            --arg pr_merge_sha "$pr_merge_sha" \
+            --argjson product_integrated "$product_integrated" \
+            --argjson open_pull_count "$open_pull_count" \
+            --argjson residue "$residue" \
+            --arg official_ci_id "$official_ci_id" \
+            --arg official_ci_status "$official_ci_status" \
+            --arg official_ci_conclusion "$official_ci_conclusion" \
+            --arg official_fixed "$official_fixed" \
+            --arg official_current "$official_current" \
+            --argjson official_ci_green "$official_ci_green" \
+            '{
+              schema_version: 1,
+              repository: $repository,
+              captured_at: $captured_at,
+              status_branch: {sha: $status_branch_sha, base_sha: $status_base_sha},
+              main: {sha: $live_main_sha, tree: $live_main_tree},
+              pull_request: {
+                number: $pr_number,
+                state: $pr_state,
+                merged: $pr_merged,
+                head_ref: $pr_head_ref,
+                head_sha: $pr_head_sha,
+                head_tree: $pr_head_tree,
+                base_sha: $pr_base_sha,
+                merge_sha: $pr_merge_sha
+              },
+              product_integrated: $product_integrated,
+              open_pull_count: $open_pull_count,
+              residual_branches: $residue,
+              official_post_merge_ci: {
+                run_id: $official_ci_id,
+                status: $official_ci_status,
+                conclusion: $official_ci_conclusion,
+                node_22_16: $official_fixed,
+                node_22_x: $official_current,
+                green: $official_ci_green
+              }
+            }' > status/held-out-assessment-v2.json
+
+          git config user.name metaforismo
+          git config user.email 39646696+metaforismo@users.noreply.github.com
+          git add status/held-out-assessment-v2.json
+          git commit -m 'chore: record held-out assessment integration status'
+          git push origin HEAD
