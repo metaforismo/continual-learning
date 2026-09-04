@@ -1,0 +1,288 @@
+name: Temporary reconcile held-out canary assessment 20260904
+
+on:
+  push:
+    branches:
+      - tmp/reconcile-held-out-canary-assessment-20260904
+
+permissions:
+  contents: write
+  pull-requests: write
+  actions: read
+  checks: read
+
+concurrency:
+  group: reconcile-held-out-canary-assessment-20260904
+  cancel-in-progress: false
+
+jobs:
+  reconcile:
+    name: finish verified integration or verify existing merge
+    runs-on: ubuntu-24.04
+    timeout-minutes: 35
+    env:
+      GH_TOKEN: ${{ github.token }}
+      REPOSITORY: metaforismo/continual-learning
+      OWNER: metaforismo
+      REPO: continual-learning
+      PR_NUMBER: "21"
+      EXPECTED_BASE: bf9926188c9f3c678bd84b5b9e506a22146e6080
+      EXPECTED_HEAD_BRANCH: feat/held-out-canary-result-assessment-v1
+    steps:
+      - name: Checkout exact reconcile branch
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          fetch-depth: 0
+
+      - name: Set up Node.js 22.16.0
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        with:
+          node-version: 22.16.0
+
+      - name: Resolve current authoritative state
+        id: state
+        shell: bash
+        run: |
+          set -euo pipefail
+          bootstrap_sha="$(git rev-parse HEAD^)"
+          git fetch --prune origin main
+          current_main="$(git rev-parse origin/main)"
+          pr_json="$(gh api "repos/$REPOSITORY/pulls/$PR_NUMBER")"
+          pr_state="$(jq -r '.state' <<<"$pr_json")"
+          merged="$(jq -r '.merged' <<<"$pr_json")"
+          head_sha="$(jq -r '.head.sha' <<<"$pr_json")"
+          head_ref="$(jq -r '.head.ref' <<<"$pr_json")"
+          merge_sha="$(jq -r '.merge_commit_sha // empty' <<<"$pr_json")"
+
+          test "$head_ref" = "$EXPECTED_HEAD_BRANCH"
+          test "$(jq -r '.base.ref' <<<"$pr_json")" = main
+
+          if [[ "$merged" == true ]]; then
+            test "$pr_state" = closed
+            test -n "$merge_sha"
+            test "$current_main" = "$merge_sha"
+            test "$bootstrap_sha" = "$merge_sha"
+            mode=verify-merged
+          else
+            test "$pr_state" = open
+            test "$(jq -r '.draft' <<<"$pr_json")" = false
+            test "$(jq -r '.base.sha' <<<"$pr_json")" = "$EXPECTED_BASE"
+            test "$current_main" = "$EXPECTED_BASE"
+            test "$bootstrap_sha" = "$EXPECTED_BASE"
+            git fetch origin "$EXPECTED_HEAD_BRANCH"
+            test "$(git rev-parse "origin/$EXPECTED_HEAD_BRANCH")" = "$head_sha"
+            test "$(git rev-parse "$head_sha^")" = "$EXPECTED_BASE"
+            mode=merge-open
+          fi
+
+          echo "mode=$mode" >> "$GITHUB_OUTPUT"
+          echo "head_sha=$head_sha" >> "$GITHUB_OUTPUT"
+          echo "merge_sha=$merge_sha" >> "$GITHUB_OUTPUT"
+
+      - name: Wait for official PR CI
+        if: steps.state.outputs.mode == 'merge-open'
+        id: preci
+        shell: bash
+        env:
+          HEAD_SHA: ${{ steps.state.outputs.head_sha }}
+        run: |
+          set -euo pipefail
+          deadline=$((SECONDS + 900))
+          while true; do
+            runs="$(gh api "repos/$REPOSITORY/actions/runs?event=pull_request&head_sha=$HEAD_SHA&per_page=100")"
+            run_id="$(jq -r --arg head "$HEAD_SHA" '[.workflow_runs[] | select(.name == "CI" and .head_sha == $head)] | sort_by(.created_at) | last | .id // empty' <<<"$runs")"
+            status="$(jq -r --arg head "$HEAD_SHA" '[.workflow_runs[] | select(.name == "CI" and .head_sha == $head)] | sort_by(.created_at) | last | .status // "missing"' <<<"$runs")"
+            conclusion="$(jq -r --arg head "$HEAD_SHA" '[.workflow_runs[] | select(.name == "CI" and .head_sha == $head)] | sort_by(.created_at) | last | .conclusion // "pending"' <<<"$runs")"
+            if [[ -n "$run_id" && "$status" == completed && "$conclusion" == success ]]; then
+              jobs="$(gh api "repos/$REPOSITORY/actions/runs/$run_id/jobs?per_page=100")"
+              fixed="$(jq -r '[.jobs[] | select(.name == "Node 22.16.0")] | sort_by(.started_at) | last | .conclusion // "missing"' <<<"$jobs")"
+              current="$(jq -r '[.jobs[] | select(.name == "Node 22.x")] | sort_by(.started_at) | last | .conclusion // "missing"' <<<"$jobs")"
+              [[ "$fixed" == success && "$current" == success ]] || exit 1
+              echo "run_id=$run_id" >> "$GITHUB_OUTPUT"
+              break
+            fi
+            if [[ "$status" == completed && "$conclusion" != success && "$conclusion" != pending ]]; then
+              echo "required PR CI failed: $conclusion" >&2
+              exit 1
+            fi
+            (( SECONDS < deadline )) || { echo "timed out waiting for PR CI" >&2; exit 1; }
+            sleep 10
+          done
+
+      - name: Verify review state and exact feature head
+        if: steps.state.outputs.mode == 'merge-open'
+        shell: bash
+        env:
+          HEAD_SHA: ${{ steps.state.outputs.head_sha }}
+        run: |
+          set -euo pipefail
+          changed="$(gh api "repos/$REPOSITORY/pulls/$PR_NUMBER/files?per_page=100")"
+          test "$(jq 'length' <<<"$changed")" -gt 0
+          test "$(jq '[.[] | select(.filename | startswith(".github/") or startswith("dist/") or startswith("node_modules/"))] | length' <<<"$changed")" -eq 0
+          reviews="$(gh api "repos/$REPOSITORY/pulls/$PR_NUMBER/reviews?per_page=100")"
+          test "$(jq '[.[] | select(.state == "CHANGES_REQUESTED")] | length' <<<"$reviews")" -eq 0
+          threads="$(gh api graphql -f query='query($owner:String!,$name:String!,$number:Int!){repository(owner:$owner,name:$name){pullRequest(number:$number){reviewThreads(first:100){nodes{isResolved}}}}}' -f owner="$OWNER" -f name="$REPO" -F number="$PR_NUMBER")"
+          test "$(jq '[.data.repository.pullRequest.reviewThreads.nodes[] | select(.isResolved == false)] | length' <<<"$threads")" -eq 0
+          git checkout --detach "$HEAD_SHA"
+          test "$(git rev-parse HEAD^)" = "$EXPECTED_BASE"
+          git diff --check "$EXPECTED_BASE" "$HEAD_SHA" --
+          npm ci --ignore-scripts --no-audit --no-fund
+          npm run build
+          node --test test/canonical-canary-receipts.test.mjs
+          node --test test/held-out-canary-result-assessment.test.mjs
+          npm run check
+          npm audit --omit=dev --audit-level=high
+          git diff --check "$EXPECTED_BASE" "$HEAD_SHA" --
+
+      - name: Merge exact feature head when still open
+        if: steps.state.outputs.mode == 'merge-open'
+        id: merge
+        shell: bash
+        env:
+          HEAD_SHA: ${{ steps.state.outputs.head_sha }}
+        run: |
+          set -euo pipefail
+          test "$(git ls-remote origin refs/heads/main | cut -f1)" = "$EXPECTED_BASE"
+          result="$(gh api --method PUT "repos/$REPOSITORY/pulls/$PR_NUMBER/merge" -f merge_method=squash -f sha="$HEAD_SHA")"
+          test "$(jq -r '.merged' <<<"$result")" = true
+          merge_sha="$(jq -r '.sha' <<<"$result")"
+          test -n "$merge_sha"
+          test "$merge_sha" != null
+          echo "merge_sha=$merge_sha" >> "$GITHUB_OUTPUT"
+
+      - name: Resolve authoritative merge SHA
+        id: merged
+        shell: bash
+        env:
+          MODE: ${{ steps.state.outputs.mode }}
+          EXISTING_MERGE_SHA: ${{ steps.state.outputs.merge_sha }}
+          NEW_MERGE_SHA: ${{ steps.merge.outputs.merge_sha }}
+        run: |
+          set -euo pipefail
+          if [[ "$MODE" == verify-merged ]]; then
+            merge_sha="$EXISTING_MERGE_SHA"
+          else
+            merge_sha="$NEW_MERGE_SHA"
+          fi
+          test -n "$merge_sha"
+          echo "merge_sha=$merge_sha" >> "$GITHUB_OUTPUT"
+
+      - name: Verify published tree, full gates, and official main CI
+        id: post
+        shell: bash
+        env:
+          HEAD_SHA: ${{ steps.state.outputs.head_sha }}
+          MERGE_SHA: ${{ steps.merged.outputs.merge_sha }}
+        run: |
+          set -euo pipefail
+          deadline=$((SECONDS + 180))
+          while true; do
+            git fetch --prune origin main
+            [[ "$(git rev-parse origin/main)" == "$MERGE_SHA" ]] && break
+            (( SECONDS < deadline )) || { echo "main did not reach merge SHA" >&2; exit 1; }
+            sleep 3
+          done
+
+          head_tree="$(git rev-parse "$HEAD_SHA^{tree}")"
+          main_tree="$(git rev-parse "$MERGE_SHA^{tree}")"
+          test "$head_tree" = "$main_tree"
+
+          git clean -ffdx
+          git checkout --detach "$MERGE_SHA"
+          npm ci --ignore-scripts --no-audit --no-fund
+          npm run build
+          node --test test/canonical-canary-receipts.test.mjs
+          node --test test/held-out-canary-result-assessment.test.mjs
+          npm run check
+          npm audit --omit=dev --audit-level=high
+          git diff --check HEAD^ HEAD --
+
+          deadline=$((SECONDS + 900))
+          while true; do
+            runs="$(gh api "repos/$REPOSITORY/actions/runs?event=push&branch=main&head_sha=$MERGE_SHA&per_page=100")"
+            run_id="$(jq -r --arg head "$MERGE_SHA" '[.workflow_runs[] | select(.name == "CI" and .head_sha == $head)] | sort_by(.created_at) | last | .id // empty' <<<"$runs")"
+            status="$(jq -r --arg head "$MERGE_SHA" '[.workflow_runs[] | select(.name == "CI" and .head_sha == $head)] | sort_by(.created_at) | last | .status // "missing"' <<<"$runs")"
+            conclusion="$(jq -r --arg head "$MERGE_SHA" '[.workflow_runs[] | select(.name == "CI" and .head_sha == $head)] | sort_by(.created_at) | last | .conclusion // "pending"' <<<"$runs")"
+            if [[ -n "$run_id" && "$status" == completed && "$conclusion" == success ]]; then
+              jobs="$(gh api "repos/$REPOSITORY/actions/runs/$run_id/jobs?per_page=100")"
+              fixed="$(jq -r '[.jobs[] | select(.name == "Node 22.16.0")] | sort_by(.started_at) | last | .conclusion // "missing"' <<<"$jobs")"
+              current="$(jq -r '[.jobs[] | select(.name == "Node 22.x")] | sort_by(.started_at) | last | .conclusion // "missing"' <<<"$jobs")"
+              [[ "$fixed" == success && "$current" == success ]] || exit 1
+              echo "main_run_id=$run_id" >> "$GITHUB_OUTPUT"
+              break
+            fi
+            if [[ "$status" == completed && "$conclusion" != success && "$conclusion" != pending ]]; then
+              echo "post-merge CI failed: $conclusion" >&2
+              exit 1
+            fi
+            (( SECONDS < deadline )) || { echo "timed out waiting for main CI" >&2; exit 1; }
+            sleep 10
+          done
+
+          cat > /tmp/reconcile-evidence.txt <<EOF
+          repository=$REPOSITORY
+          pull_request=$PR_NUMBER
+          mode=${{ steps.state.outputs.mode }}
+          base_sha=$EXPECTED_BASE
+          feature_sha=$HEAD_SHA
+          feature_tree=$head_tree
+          merge_sha=$MERGE_SHA
+          main_tree=$main_tree
+          pr_ci_run=${{ steps.preci.outputs.run_id }}
+          main_ci_run=$run_id
+          receipt_suite=success
+          assessment_suite=success
+          full_suite=success
+          production_audit=success
+          EOF
+
+      - name: Record final verified state
+        shell: bash
+        env:
+          HEAD_SHA: ${{ steps.state.outputs.head_sha }}
+          MERGE_SHA: ${{ steps.merged.outputs.merge_sha }}
+        run: |
+          body=$(cat <<EOF
+          Reconciliation completed successfully.
+
+          - exact feature head: \`$HEAD_SHA\`
+          - published main: \`$MERGE_SHA\`
+          - reviewed feature tree equals the published main tree
+          - exact-head or existing-merge validation, dedicated suites, full suite, diff check, production audit, and official main CI passed
+          - no execution or procedure-promotion authority was introduced
+          EOF
+          )
+          gh api --method POST "repos/$REPOSITORY/issues/$PR_NUMBER/comments" -f body="$body" >/dev/null
+
+      - name: Upload reconciliation evidence
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: held-out-canary-result-assessment-reconcile-20260904
+          path: /tmp/reconcile-evidence.txt
+          if-no-files-found: error
+          retention-days: 1
+
+      - name: Clean integrated and stale temporary branches
+        if: success()
+        shell: bash
+        run: |
+          set -euo pipefail
+          branches=(
+            feat/held-out-canary-result-assessment-v1
+            tmp/publish-held-out-canary-result-assessment-v1
+            tmp/finalize-held-out-canary-assessment-20260904
+            tmp/finalize-held-out-canary-result-assessment-v1
+            tmp/cleanup-held-out-assessment-finalization
+            tmp/noop-output-probe
+            tmp/release-transfer-anchor
+            tmp/release-transfer-anchor-2
+            tmp/release-upload-check
+          )
+          open="$(gh api "repos/$REPOSITORY/pulls?state=open&per_page=100")"
+          for branch in "${branches[@]}"; do
+            test "$(jq --arg branch "$branch" '[.[] | select(.head.ref == $branch)] | length' <<<"$open")" -eq 0
+            if git ls-remote --exit-code --heads origin "$branch" >/dev/null 2>&1; then
+              git push origin --delete "$branch"
+            fi
+          done
+          git push origin --delete tmp/reconcile-held-out-canary-assessment-20260904 || true
