@@ -1,0 +1,138 @@
+name: Temporary publish held-out canary result assessment v1
+
+on:
+  push:
+    branches:
+      - tmp/publish-held-out-canary-result-assessment-v1
+
+permissions:
+  contents: write
+  pull-requests: write
+
+concurrency:
+  group: publish-held-out-canary-result-assessment-v1
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    env:
+      GH_TOKEN: ${{ github.token }}
+      REPOSITORY: metaforismo/continual-learning
+      EXPECTED_MAIN: bf9926188c9f3c678bd84b5b9e506a22146e6080
+      REVIEWED_TREE: bdca3346fdd6bf3f9a9b3f5522c93490e4715599
+      FEATURE_BRANCH: feat/held-out-canary-result-assessment-v1
+    steps:
+      - name: Publish exact reviewed tree and open pull request
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          main_sha="$(gh api "repos/$REPOSITORY/git/ref/heads/main" --jq '.object.sha')"
+          test "$main_sha" = "$EXPECTED_MAIN"
+
+          tree_sha="$(gh api "repos/$REPOSITORY/git/trees/$REVIEWED_TREE" --jq '.sha')"
+          test "$tree_sha" = "$REVIEWED_TREE"
+
+          existing_ref="$(gh api "repos/$REPOSITORY/git/ref/heads/$FEATURE_BRANCH" --jq '.object.sha' 2>/dev/null || true)"
+          test -z "$existing_ref"
+
+          existing_prs="$(gh api "repos/$REPOSITORY/pulls?state=all&head=metaforismo:$FEATURE_BRANCH&per_page=100")"
+          test "$(jq 'length' <<<"$existing_prs")" -eq 0
+
+          commit_json="$(gh api --method POST "repos/$REPOSITORY/git/commits" \
+            -f message='feat: add held-out canary result assessment' \
+            -f tree="$REVIEWED_TREE" \
+            -f 'parents[]'="$EXPECTED_MAIN")"
+          feature_sha="$(jq -r '.sha' <<<"$commit_json")"
+          test -n "$feature_sha"
+          test "$feature_sha" != null
+          test "$(jq -r '.tree.sha' <<<"$commit_json")" = "$REVIEWED_TREE"
+          test "$(jq -r '.parents | length' <<<"$commit_json")" -eq 1
+          test "$(jq -r '.parents[0].sha' <<<"$commit_json")" = "$EXPECTED_MAIN"
+
+          gh api --method POST "repos/$REPOSITORY/git/refs" \
+            -f ref="refs/heads/$FEATURE_BRANCH" \
+            -f sha="$feature_sha" >/dev/null
+
+          test "$(gh api "repos/$REPOSITORY/git/ref/heads/$FEATURE_BRANCH" --jq '.object.sha')" = "$feature_sha"
+          test "$(gh api "repos/$REPOSITORY/git/commits/$feature_sha" --jq '.tree.sha')" = "$REVIEWED_TREE"
+
+          body=$(cat <<'EOF'
+          ## Summary
+
+          Adds `held-out-canary-result-assessment-v1` on top of the guarded canonical canary receipt boundary. The assessment is omission-resistant, explicitly accounts for complete and stopped experiments, collapses dependent verifier source families, preserves retries and failures, and emits only a recommendation for human lifecycle review.
+
+          ## Correctness and authority boundary
+
+          - requires an assessment policy issued after independent plan review and before the first trial receipt
+          - snapshots the guarded registry internally rather than accepting a caller-selected favorable subset
+          - binds every receipt to its exact canonical fingerprint and event count, and revalidates predecessor lineage
+          - requires complete assignment, attempt, completion, outcome, stop, and rollback accounting, or an explicit stopped-experiment manifest
+          - retains failed attempts in denominators even when a later retry succeeds
+          - refuses treatment/control effect estimates for stopped experiments where early stopping may bias the observed subset
+          - collapses direct and transitive verifier-source-family dependence before reduction
+          - uses a conservative component reduction: worst treatment result and best control result
+          - detects negative transfer, verifier failures, missing outcomes, resource breaches, and failed or missing rollback
+          - returns at most `eligible-for-human-review`; it never grants scheduling, execution, lifecycle, rollback, or promotion authority
+
+          ## Adversarial hardening
+
+          The final review added regression coverage for:
+
+          - invalid requests creating hidden registry snapshots before validation
+          - a zero negative-effect threshold misclassifying exact zero as harmful
+          - monitoring being treated as final even when it predates the latest outcome
+          - same-length canonical forks and truncated receipt histories
+          - omitted canonical outcome evidence and source families
+          - post-stop admissions, starts, or monitoring
+          - missing terminal outcomes, final stop evaluations, or required rollback receipts
+          - retries hiding earlier failures
+          - structural clones and core-only capabilities crossing the guarded API
+
+          ## Verification
+
+          - exact base: `bf9926188c9f3c678bd84b5b9e506a22146e6080`
+          - exact reviewed tree: `bdca3346fdd6bf3f9a9b3f5522c93490e4715599`
+          - reviewed patch SHA-256: `60e6f0dc8e05c975ac194f2b9abf45db1a1ee732a0cb5523a761b7fd68dc553f`
+          - canonical receipt suite: **29 / 29**
+          - held-out assessment suite: **25 / 25**
+          - complete repository suite: **366 / 366**
+          - TypeScript strict build: success
+          - clean-room tree reconstruction: success
+          - production dependency audit: **0 vulnerabilities**
+
+          ## Known limitations
+
+          - assessment policy, receipts, registries, and assessment capabilities remain process-local rather than restart-authenticated durable state
+          - the trusted host still owns canonical-history access and external runtime instrumentation
+          - resource counters are not yet backed by a durable runtime-owned monotonic meter
+          - the recommendation is advisory and cannot mutate procedure lifecycle state
+
+          ## Next gate
+
+          `durable-canary-trial-registry-v1`: persist and authenticate assignment, policy, receipts, meters, stop/rollback state, and assessments across restart and concurrent writers while keeping execution and procedure-promotion authority separate.
+          EOF
+          )
+
+          pr_json="$(gh api --method POST "repos/$REPOSITORY/pulls" \
+            -f title='feat: add held-out canary result assessment' \
+            -f head="$FEATURE_BRANCH" \
+            -f base=main \
+            -f body="$body")"
+          pr_number="$(jq -r '.number' <<<"$pr_json")"
+          test -n "$pr_number"
+          test "$pr_number" != null
+          test "$(jq -r '.head.sha' <<<"$pr_json")" = "$feature_sha"
+          test "$(jq -r '.base.sha' <<<"$pr_json")" = "$EXPECTED_MAIN"
+
+          printf 'feature_sha=%s\npr_number=%s\nreviewed_tree=%s\n' \
+            "$feature_sha" "$pr_number" "$REVIEWED_TREE"
+
+      - name: Delete temporary publication branch
+        if: success()
+        shell: bash
+        run: |
+          set -euo pipefail
+          gh api --method DELETE "repos/$REPOSITORY/git/refs/heads/$GITHUB_REF_NAME"
